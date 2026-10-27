@@ -1,0 +1,24 @@
+[package]
+name = "lanchat-net"
+version = "0.1.0"
+edition = "2021"
+description = "Peer-to-peer LAN messaging core for ChatLocal (framing, discovery, relay, storage)."
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "fs"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
+hex = "0.4"
+thiserror = "2"
+tracing = "0.1"
+mdns-sd = "0.21"
+local-ip-address = "0.6"
+mime_guess = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tracing-subscriber = "0.3"
