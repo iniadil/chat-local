@@ -1,0 +1,53 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "ChatLocal",
+  "version": "0.1.0",
+  "identifier": "app.chatlocal.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "ChatLocal",
+        "width": 1100,
+        "height": 740,
+        "minWidth": 760,
+        "minHeight": 520,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; connect-src ipc: http://ipc.localhost",
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/**"]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi", "dmg", "app"],
+    "category": "SocialNetworking",
+    "shortDescription": "Chat over your local network",
+    "longDescription": "Text, voice notes, images and documents between computers on the same network. No internet connection, no server, no account.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}
