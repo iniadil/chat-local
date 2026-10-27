@@ -1,6 +1,6 @@
 [package]
 name = "lanchat-net"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Peer-to-peer LAN messaging core for ChatLocal (framing, discovery, relay, storage)."
 license = "MIT"

@@ -4,6 +4,15 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.1.1] - 2026-10-28
+
+### Fixed
+
+- macOS builds are now fully ad-hoc signed. The 0.1.0 DMGs carried only a
+  linker signature, so Gatekeeper reported the app as "damaged and can't be
+  opened". The app is still unsigned by an Apple developer identity, so the
+  usual "unidentified developer" warning remains; see the README.
+
 ## [0.1.0] - 2026-10-28
 
 First public release.
@@ -31,4 +40,5 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.1.1]: https://github.com/iniadil/chat-local/releases/tag/v0.1.1
 [0.1.0]: https://github.com/iniadil/chat-local/releases/tag/v0.1.0
