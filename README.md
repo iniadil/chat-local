@@ -26,6 +26,19 @@ and macOS machines in any combination.
   the others at its address. See [Server mode](#server-mode-optional).
 - Indonesian and English interface, light and dark themes.
 
+## System requirements
+
+| | Minimum |
+|---|---|
+| **Windows** | Windows 10 version 1803 or newer, or Windows 11, 64‑bit. Needs the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11 and current Windows 10; the installer downloads it if missing). |
+| **macOS** | macOS 11 Big Sur or newer. Separate builds for Apple Silicon (M1 and later) and Intel. |
+| **Memory** | 4 GB RAM. The app itself uses about 100–150 MB; a file being sent or received is held in memory during transfer, so sending a 500 MB file briefly needs that much free RAM. |
+| **Disk** | About 30 MB for the app, plus space for received files (`files/` in the data folder). |
+| **Network** | Wi‑Fi or Ethernet on the same local network, TCP port 47800 (configurable) reachable between machines, and UDP port 5353 (mDNS) for automatic discovery. Internet is not needed. |
+| **Microphone** | Any built‑in or USB microphone, only for voice notes. |
+
+Linux is not shipped as an installer but builds from source on any distribution with WebKitGTK 4.1.
+
 ## Install
 
 Download the latest installer from the
