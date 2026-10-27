@@ -1,5 +1,9 @@
 # ChatLocal
 
+[![Build installers](https://github.com/iniadil/chat-local/actions/workflows/build.yml/badge.svg)](https://github.com/iniadil/chat-local/actions/workflows/build.yml)
+[![Latest release](https://img.shields.io/github/v/release/iniadil/chat-local)](https://github.com/iniadil/chat-local/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Chat between computers on the same local network. Text, voice notes, images and
 documents. No internet connection, no account, no cloud. Works between Windows
 and macOS machines in any combination.
@@ -229,6 +233,12 @@ Other limits: attachments are held in memory during transfer and capped at
 512 MB; there is no encryption; there are no read receipts or typing
 indicators; a message to a computer that is offline is rejected rather than
 queued.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Release history is in
+[CHANGELOG.md](CHANGELOG.md), and the security model is described in
+[SECURITY.md](SECURITY.md).
 
 ## License
 
