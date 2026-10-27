@@ -63,9 +63,16 @@ operating systems warn you the first time:
   On first launch Windows Firewall asks to allow ChatLocal: tick **Private
   networks** and allow it, otherwise other computers cannot reach you.
 - **macOS** says the app "cannot be opened because the developer cannot be
-  verified". Right‑click the app → *Open* → *Open*, or run
-  `xattr -dr com.apple.quarantine /Applications/ChatLocal.app` once in Terminal.
-  macOS also asks for microphone access the first time you record a voice note
+  verified" or, on some versions, that it "is damaged and can't be opened".
+  Neither means the download is broken. After copying the app to
+  Applications, run this once in Terminal, then open it normally:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/ChatLocal.app
+  ```
+
+  On macOS 15 and newer you can instead open *System Settings → Privacy &
+  Security* and click *Open Anyway* after the first failed launch. macOS also asks for microphone access the first time you record a voice note
   and for local‑network access the first time the app searches for peers.
 
 Windows needs the WebView2 runtime; it is preinstalled on Windows 10 (recent

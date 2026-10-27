@@ -72,6 +72,9 @@ jobs:
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Ad-hoc sign the macOS bundle. Without a full ad-hoc signature Gatekeeper
+          # reports the app as "damaged" instead of just unidentified-developer.
+          APPLE_SIGNING_IDENTITY: "-"
         with:
           args: ${{ matrix.args }}
           # Only publish a release when the push is a version tag.
