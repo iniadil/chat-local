@@ -53,6 +53,9 @@ struct Inner {
     known_addrs: HashMap<PeerId, Vec<SocketAddr>>,
     /// Addresses with a connection attempt in flight.
     connecting: HashSet<SocketAddr>,
+    /// Addresses that turned out to be this very node (someone typed our own
+    /// address, or discovery echoed our own announcement).
+    self_addrs: HashSet<SocketAddr>,
 }
 
 struct Seen {
@@ -484,7 +487,7 @@ impl Node {
             };
             {
                 let mut inner = self.inner.lock().unwrap();
-                if inner.connecting.contains(&addr) {
+                if inner.connecting.contains(&addr) || inner.self_addrs.contains(&addr) {
                     continue;
                 }
                 if peer_id.is_none()
@@ -532,6 +535,7 @@ impl Node {
         ready: &mut Option<tokio::sync::oneshot::Sender<Result<(), Error>>>,
     ) -> Result<(), Error> {
         let remote = stream.peer_addr()?;
+        let remote_target = remote;
         let _ = stream.set_nodelay(true);
         let (rd, wr) = stream.into_split();
         let mut rd = BufReader::with_capacity(64 * 1024, rd);
@@ -569,6 +573,9 @@ impl Node {
         }
         if id == self.identity.id {
             // Discovered our own announcement, or someone typed our own address.
+            if initiated_by_me {
+                self.inner.lock().unwrap().self_addrs.insert(remote_target);
+            }
             if let Some(tx) = ready.take() {
                 let _ = tx.send(Err(Error::Other("that address is this computer".into())));
             }

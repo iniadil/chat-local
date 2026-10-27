@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi", "dmg", "app"],
+    "targets": "all",
     "category": "SocialNetworking",
     "shortDescription": "Chat over your local network",
     "longDescription": "Text, voice notes, images and documents between computers on the same network. No internet connection, no server, no account.",

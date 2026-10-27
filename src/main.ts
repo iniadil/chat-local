@@ -1,4 +1,4 @@
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, bytesToBase64, type Message, type NetEvent, type Peer, type Settings, type Snapshot } from "./api";
@@ -693,7 +693,8 @@ async function main() {
   $("btn-settings-close").onclick = () => ($("settings-modal").hidden = true);
   $("settings-form").addEventListener("submit", (e) => void submitSettings(e));
   $("btn-clear-history").onclick = async () => {
-    if (!confirm(t().clearHistoryConfirm)) return;
+    const yes = await confirmDialog(t().clearHistoryConfirm, { title: "ChatLocal", kind: "warning" });
+    if (!yes) return;
     try {
       await api.clearHistory();
       state.messages = [];

@@ -27,15 +27,24 @@ export class Recorder {
   }
 
   async start(onAutoStop: () => void) {
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-    });
+    // Create the context synchronously, while still inside the click handler:
+    // WebKit only lets an AudioContext run when it was created by a user
+    // gesture, and a suspended context would record silence.
     let ctx: AudioContext;
     try {
       ctx = new AudioContext({ sampleRate: TARGET_RATE });
     } catch {
       ctx = new AudioContext();
     }
+    try {
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
+      });
+    } catch (e) {
+      await ctx.close().catch(() => undefined);
+      throw e;
+    }
+    if (ctx.state !== "running") await ctx.resume().catch(() => undefined);
     this.ctx = ctx;
     this.sourceRate = ctx.sampleRate;
     this.chunks = [];
