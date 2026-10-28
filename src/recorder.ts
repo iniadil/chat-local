@@ -8,6 +8,42 @@
 
 const TARGET_RATE = 16000;
 const MAX_SECONDS = 5 * 60;
+const DEVICE_KEY = "micDeviceId";
+
+export interface MicDevice {
+  id: string;
+  label: string;
+}
+
+/** The microphone the user picked in Settings; "" means the system default. */
+export function preferredMic(): string {
+  try {
+    return localStorage.getItem(DEVICE_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export function setPreferredMic(id: string) {
+  try {
+    if (id) localStorage.setItem(DEVICE_KEY, id);
+    else localStorage.removeItem(DEVICE_KEY);
+  } catch {
+    // Storage unavailable: the choice just does not persist.
+  }
+}
+
+/**
+ * Audio inputs the WebView can see. Labels are empty until the microphone
+ * permission has been granted once (i.e. after the first voice note).
+ */
+export async function listMics(): Promise<MicDevice[]> {
+  if (!navigator.mediaDevices?.enumerateDevices) return [];
+  const all = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  return all
+    .filter((d) => d.kind === "audioinput" && d.deviceId && d.deviceId !== "default")
+    .map((d, i) => ({ id: d.deviceId, label: d.label || `Microphone ${i + 1}` }));
+}
 
 export class Recorder {
   private ctx: AudioContext | null = null;
@@ -36,10 +72,19 @@ export class Recorder {
     } catch {
       ctx = new AudioContext();
     }
+    const base = { echoCancellation: true, noiseSuppression: true, channelCount: 1 };
+    const wanted = preferredMic();
     try {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
+      try {
+        this.stream = await navigator.mediaDevices.getUserMedia({
+          audio: wanted ? { ...base, deviceId: { exact: wanted } } : base,
+        });
+      } catch (e) {
+        // The chosen microphone is gone (unplugged, renumbered): fall back
+        // to the default rather than failing the recording.
+        if (!wanted || (e as DOMException).name !== "OverconstrainedError") throw e;
+        this.stream = await navigator.mediaDevices.getUserMedia({ audio: base });
+      }
     } catch (e) {
       await ctx.close().catch(() => undefined);
       throw e;

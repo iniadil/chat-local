@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { api, bytesToBase64, type Message, type NetEvent, type Peer, type Settings, type Snapshot, type TransferDirection } from "./api";
 import { applyStatic, lang, setLang, t, type Lang } from "./i18n";
-import { Recorder } from "./recorder";
+import { Recorder, listMics, preferredMic, setPreferredMic } from "./recorder";
 
 // ---------------------------------------------------------------- state
 
@@ -550,6 +550,33 @@ function openSettings() {
   $("settings-addrs").textContent = state.addresses.map((a) => `${a}:${state.port ?? s.port}`).join("  ") || "–";
   $("settings-datadir").textContent = state.dataDir;
   $("settings-modal").hidden = false;
+  void fillMicSelect();
+}
+
+async function fillMicSelect() {
+  const sel = $<HTMLSelectElement>("mic-select");
+  const chosen = preferredMic();
+  const mics = await listMics();
+  sel.replaceChildren();
+  const def = document.createElement("option");
+  def.value = "";
+  def.textContent = t().microphoneDefault;
+  sel.appendChild(def);
+  for (const m of mics) {
+    const o = document.createElement("option");
+    o.value = m.id;
+    o.textContent = m.label;
+    sel.appendChild(o);
+  }
+  // Keep a saved device that is currently unplugged selectable, so the
+  // choice is not silently lost.
+  if (chosen && !mics.some((m) => m.id === chosen)) {
+    const o = document.createElement("option");
+    o.value = chosen;
+    o.textContent = "(" + t().offline + ")";
+    sel.appendChild(o);
+  }
+  sel.value = chosen;
 }
 
 async function submitSettings(ev: Event) {
@@ -560,6 +587,7 @@ async function submitSettings(ev: Event) {
     setLang(newLang);
     applyStatic();
   }
+  setPreferredMic((f.elements.namedItem("mic") as HTMLSelectElement).value);
   const settings: Settings = {
     display_name: (f.elements.namedItem("display_name") as HTMLInputElement).value.trim(),
     discovery: (f.elements.namedItem("discovery") as HTMLInputElement).checked,
