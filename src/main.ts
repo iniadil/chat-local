@@ -457,6 +457,7 @@ function addMessage(m: Message, incoming: boolean) {
 async function sendCurrentText() {
   const input = $<HTMLTextAreaElement>("input");
   const text = input.value.trim();
+  if (pending.length) await sendPending();
   if (!text) return;
   input.value = "";
   autosize(input);
@@ -476,29 +477,134 @@ function friendlyError(e: unknown) {
   return s;
 }
 
-async function sendPaths(paths: string[]) {
-  if (!paths.length) return;
-  try {
-    const sent = await api.sendFiles(target(), paths);
-    sent.forEach((m) => addMessage(m, false));
-  } catch (e) {
-    toast(friendlyError(e), true);
+// ---------- pending attachments ----------
+// Files dropped, picked or pasted wait here until the user presses Send, so
+// nothing leaves the machine by accident.
+
+type Pending =
+  | { kind: "path"; key: string; path: string; file_name: string; size: number; mime: string; preview?: string }
+  | { kind: "blob"; key: string; bytes: Uint8Array; file_name: string; size: number; mime: string; preview?: string };
+
+const pending: Pending[] = [];
+let pendingSeq = 0;
+
+function renderPending() {
+  const root = $("pending");
+  const list = $("pending-list");
+  root.hidden = pending.length === 0;
+  list.replaceChildren(
+    ...pending.map((p) => {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      if (p.preview) {
+        const img = document.createElement("img");
+        img.src = p.preview;
+        img.alt = p.file_name;
+        chip.appendChild(img);
+      } else {
+        const ico = document.createElement("div");
+        ico.className = "file-ico";
+        ico.textContent = (p.file_name.split(".").pop() ?? "").slice(0, 4) || "file";
+        chip.appendChild(ico);
+      }
+      const meta = document.createElement("div");
+      meta.className = "meta";
+      const name = document.createElement("div");
+      name.className = "name";
+      name.textContent = p.file_name;
+      name.title = p.file_name;
+      const size = document.createElement("div");
+      size.className = "size";
+      size.textContent = fmtSize(p.size);
+      meta.append(name, size);
+      const rm = document.createElement("button");
+      rm.className = "remove";
+      rm.type = "button";
+      rm.textContent = "✕";
+      rm.title = t().removeAttachment;
+      rm.setAttribute("aria-label", t().removeAttachment);
+      rm.onclick = () => {
+        const i = pending.findIndex((q) => q.key === p.key);
+        if (i >= 0) pending.splice(i, 1);
+        renderPending();
+      };
+      chip.append(meta, rm);
+      return chip;
+    }),
+  );
+  $("pending-hint").textContent = t().pendingHint(pending.length);
+  $<HTMLTextAreaElement>("input").focus();
+}
+
+async function queuePaths(paths: string[]) {
+  for (const path of paths) {
+    if (pending.some((p) => p.kind === "path" && p.path === path)) continue;
+    try {
+      const info = await api.fileInfo(path);
+      pending.push({ kind: "path", key: `p${pendingSeq++}`, ...info });
+    } catch (e) {
+      toast(friendlyError(e), true);
+    }
+  }
+  renderPending();
+}
+
+function queueBlob(bytes: Uint8Array, fileName: string, mime: string) {
+  const preview = mime.startsWith("image/") ? URL.createObjectURL(new Blob([bytes as BlobPart], { type: mime })) : undefined;
+  pending.push({ kind: "blob", key: `b${pendingSeq++}`, bytes, file_name: fileName, size: bytes.length, mime, preview });
+  renderPending();
+}
+
+function clearPending() {
+  for (const p of pending) if (p.kind === "blob" && p.preview) URL.revokeObjectURL(p.preview);
+  pending.length = 0;
+  renderPending();
+}
+
+/// Send everything queued. Items that fail stay in the queue so the user can
+/// retry or drop them.
+async function sendPending() {
+  const items = pending.splice(0);
+  renderPending();
+  const paths = items.filter((p): p is Extract<Pending, { kind: "path" }> => p.kind === "path");
+  const blobs = items.filter((p): p is Extract<Pending, { kind: "blob" }> => p.kind === "blob");
+  const failed: Pending[] = [];
+  if (paths.length) {
+    try {
+      const sent = await api.sendFiles(target(), paths.map((p) => p.path));
+      sent.forEach((m) => addMessage(m, false));
+    } catch (e) {
+      failed.push(...paths);
+      toast(friendlyError(e), true);
+    }
+  }
+  for (const b of blobs) {
+    const ok = await sendBlob(b.bytes, b.file_name, b.mime);
+    if (ok) {
+      if (b.preview) URL.revokeObjectURL(b.preview);
+    } else failed.push(b);
+  }
+  if (failed.length) {
+    pending.unshift(...failed);
+    renderPending();
   }
 }
 
-async function pickAndSend() {
+async function pickFiles() {
   const picked = await openDialog({ multiple: true, directory: false });
   if (!picked) return;
-  await sendPaths(Array.isArray(picked) ? picked : [picked]);
+  await queuePaths(Array.isArray(picked) ? picked : [picked]);
 }
 
-async function sendBlob(bytes: Uint8Array, fileName: string, mime: string, durationMs?: number) {
+async function sendBlob(bytes: Uint8Array, fileName: string, mime: string, durationMs?: number): Promise<boolean> {
   try {
     const data = await bytesToBase64(bytes);
     const m = await api.sendBlob(target(), { file_name: fileName, mime, data, duration_ms: durationMs });
     addMessage(m, false);
+    return true;
   } catch (e) {
     toast(friendlyError(e), true);
+    return false;
   }
 }
 
@@ -746,13 +852,14 @@ async function main() {
         e.preventDefault();
         file.arrayBuffer().then((buf) => {
           const ext = item.type.split("/")[1] || "png";
-          void sendBlob(new Uint8Array(buf), `pasted-${Date.now()}.${ext}`, item.type);
+          queueBlob(new Uint8Array(buf), `pasted-${Date.now()}.${ext}`, item.type);
         });
       }
     }
   });
   $("btn-send").onclick = () => void sendCurrentText();
-  $("btn-attach").onclick = () => void pickAndSend();
+  $("btn-attach").onclick = () => void pickFiles();
+  $("btn-pending-clear").onclick = clearPending;
   $("btn-mic").onclick = () => (recorder.running ? void finishRecording(true) : void startRecording());
   $("btn-rec-cancel").onclick = () => void finishRecording(false);
   $("btn-rec-send").onclick = () => void finishRecording(true);
@@ -803,7 +910,7 @@ async function main() {
     else if (ev.payload.type === "leave") overlay.hidden = true;
     else if (ev.payload.type === "drop") {
       overlay.hidden = true;
-      void sendPaths(ev.payload.paths);
+      void queuePaths(ev.payload.paths);
     }
   });
 

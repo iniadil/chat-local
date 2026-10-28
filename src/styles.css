@@ -184,6 +184,34 @@ code { font-family: var(--mono); font-size: 12px; }
 .transfer { font-size: 12px; color: var(--muted, inherit); }
 .transfer .bar { height: 4px; border-radius: 2px; margin-top: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); overflow: hidden; }
 .transfer .bar i { display: block; height: 100%; background: var(--accent); transition: width 0.2s; }
+.pending {
+  background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+  padding: 8px 10px 6px; margin-bottom: 8px;
+}
+.pending-list { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip {
+  position: relative; display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--line); border-radius: 12px; padding: 6px 30px 6px 6px;
+  max-width: 240px; background: var(--paper);
+}
+.chip img { width: 56px; height: 56px; object-fit: cover; border-radius: 8px; flex: none; }
+.chip .file-ico {
+  width: 40px; height: 40px; border-radius: 8px; flex: none; display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; text-transform: uppercase;
+  background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent);
+}
+.chip .meta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.chip .name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chip .size { font-size: 11px; color: var(--ink-2); }
+.chip .remove {
+  position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 50%;
+  border: 0; background: color-mix(in srgb, var(--ink) 10%, transparent); color: var(--ink);
+  display: grid; place-items: center; font-size: 12px; line-height: 1;
+}
+.chip .remove:hover { background: var(--danger); color: #fff; }
+.pending-foot { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+.pending-hint { font-size: 12px; color: var(--ink-2); }
+
 .composer-row {
   display: flex; align-items: flex-end; gap: 6px;
   background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 6px;
