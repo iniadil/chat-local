@@ -69,8 +69,19 @@ pub async fn save_settings(
     if settings.port == 0 {
         return Err("port must be between 1 and 65535".into());
     }
-    state.save_settings(settings)?;
-    state::start_node(&app).await?;
+    // Only the manual peer list changed (e.g. "remember" in Add computer):
+    // hand it to the running node instead of restarting, which would drop
+    // the connection that was just made.
+    let old = state.settings();
+    let only_peers_changed = Settings {
+        manual_peers: settings.manual_peers.clone(),
+        ..old
+    } == settings;
+    state.save_settings(settings.clone())?;
+    match state.node() {
+        Some(node) if only_peers_changed => node.set_manual_peers(settings.manual_peers),
+        _ => state::start_node(&app).await?,
+    }
     Ok(snapshot(&state))
 }
 
