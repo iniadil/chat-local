@@ -74,6 +74,16 @@ struct Target {
     data_tx: mpsc::Sender<Arc<Packet>>,
 }
 
+impl Target {
+    fn of(c: &Conn) -> Self {
+        Target {
+            id: c.info.id.clone(),
+            tx: c.tx.clone(),
+            data_tx: c.data_tx.clone(),
+        }
+    }
+}
+
 /// An attachment arriving on one connection.
 struct Incoming {
     message: Message,
@@ -105,6 +115,22 @@ struct Inner {
     self_addrs: HashSet<SocketAddr>,
 }
 
+impl Inner {
+    /// The connections that lead to `peer`: its own if we have one, else
+    /// every relay but `exclude`.
+    fn targets_to(&self, peer: &PeerId, exclude: Option<&PeerId>) -> Vec<Target> {
+        match self.conns.get(peer) {
+            Some(c) => vec![Target::of(c)],
+            None => self
+                .conns
+                .values()
+                .filter(|c| c.info.relay && Some(&c.info.id) != exclude)
+                .map(Target::of)
+                .collect(),
+        }
+    }
+}
+
 struct Seen {
     order: VecDeque<String>,
     set: HashSet<String>,
@@ -123,6 +149,14 @@ impl Seen {
             }
         }
         true
+    }
+
+    /// Forget `id` so a later copy of it is taken again (a failed transfer
+    /// the sender retries).
+    fn remove(&mut self, id: &str) {
+        if self.set.remove(id) {
+            self.order.retain(|o| o != id);
+        }
     }
 }
 
@@ -456,14 +490,105 @@ impl Node {
         let targets = self.route(&msg, None)?;
         // The header is already on its way: stream the bytes whatever happens
         // to the local history, or every peer would wait for chunks forever.
-        for t in targets {
-            let node = self.clone();
-            let id = msg.id.clone();
-            let path = path.clone();
-            tokio::spawn(async move { node.stream_to(id, path, total, t).await });
-        }
+        self.start_streams(&msg.id, &path, total, targets).await;
         self.store.lock().unwrap().append(msg.clone())?;
         Ok(msg)
+    }
+
+    /// Send the attachment of a message we sent earlier again, to `peers`
+    /// (the ones its transfer failed for). Each takes the same message id; a
+    /// receiver forgets the id of a transfer that failed, so it accepts it.
+    pub async fn resend(self: &Arc<Self>, message_id: &str, peers: &[PeerId]) -> Result<(), Error> {
+        let msg = self
+            .find_message(message_id)
+            .filter(|m| m.from == self.identity.id)
+            .ok_or_else(|| Error::Other("no such message".into()))?;
+        let att = msg
+            .attachment
+            .as_ref()
+            .ok_or_else(|| Error::Other("message has no attachment".into()))?;
+        let path = att
+            .path
+            .clone()
+            .ok_or_else(|| Error::Other("attachment file is missing".into()))?;
+        let total = att.size;
+        let pkt = Arc::new(Packet::frame(Frame::Message {
+            message: msg.for_wire(),
+        }));
+        // Directly if we can, else through every relay.
+        let routes: Vec<(PeerId, Vec<Target>)> = {
+            let inner = self.inner.lock().unwrap();
+            peers
+                .iter()
+                .map(|p| (p.clone(), inner.targets_to(p, None)))
+                .collect()
+        };
+        let mut targets: Vec<Target> = Vec::new();
+        let mut unreached: Vec<PeerId> = Vec::new();
+        for (peer, via) in routes {
+            let mut reached = false;
+            for t in via {
+                if targets.iter().any(|x| x.id == t.id) {
+                    reached = true;
+                    continue;
+                }
+                // On the data queue, behind what the failed transfer left
+                // there (its Abort above all): on the control queue the
+                // header could overtake that Abort and reach a receiver that
+                // has not let go of the id yet, which would then drop it.
+                if let Ok(Ok(())) = timeout(FORWARD_TIMEOUT, t.data_tx.send(pkt.clone())).await {
+                    reached = true;
+                    targets.push(t);
+                }
+            }
+            if !reached {
+                unreached.push(peer);
+            }
+        }
+        if targets.is_empty() {
+            let who = peers.first().cloned().unwrap_or_default();
+            return Err(Error::Unreachable(who));
+        }
+        // The UI drops the old failures of every peer it retried; report
+        // the ones this attempt could not reach again.
+        for peer in unreached {
+            let reason = Error::Unreachable(peer.clone()).to_string();
+            self.emit(Event::TransferFailed {
+                message_id: msg.id.clone(),
+                peer,
+                direction: TransferDirection::Sending,
+                reason,
+            })
+            .await;
+        }
+        self.start_streams(&msg.id, &path, total, targets).await;
+        Ok(())
+    }
+
+    /// Stream an announced attachment to each target in the background. A
+    /// zero progress event per target comes first, so the UI knows whom the
+    /// message is going to before any byte moves.
+    async fn start_streams(
+        self: &Arc<Self>,
+        id: &str,
+        path: &Path,
+        total: u64,
+        targets: Vec<Target>,
+    ) {
+        for t in targets {
+            self.emit(Event::Transfer {
+                message_id: id.to_string(),
+                peer: t.id.clone(),
+                direction: TransferDirection::Sending,
+                done: 0,
+                total,
+            })
+            .await;
+            let node = self.clone();
+            let id = id.to_string();
+            let path = path.to_path_buf();
+            tokio::spawn(async move { node.stream_to(id, path, total, t).await });
+        }
     }
 
     /// Read the file in chunks and push them into one connection's data
@@ -565,31 +690,15 @@ impl Node {
         }));
         let candidates: Vec<Target> = {
             let inner = self.inner.lock().unwrap();
-            let target_of = |c: &Conn| Target {
-                id: c.info.id.clone(),
-                tx: c.tx.clone(),
-                data_tx: c.data_tx.clone(),
-            };
             match &message.to {
                 None => inner
                     .conns
                     .values()
                     .filter(|c| Some(&c.info.id) != exclude)
-                    .map(target_of)
+                    .map(Target::of)
                     .collect(),
-                Some(to) => {
-                    if let Some(c) = inner.conns.get(to) {
-                        vec![target_of(c)]
-                    } else {
-                        // Not directly connected: hand it to the relays.
-                        inner
-                            .conns
-                            .values()
-                            .filter(|c| c.info.relay && Some(&c.info.id) != exclude)
-                            .map(target_of)
-                            .collect()
-                    }
-                }
+                // Not directly connected: hand it to the relays.
+                Some(to) => inner.targets_to(to, exclude),
             }
         };
         if candidates.is_empty() {
@@ -924,10 +1033,28 @@ impl Node {
                     }
                 }
             }
+            // A dead writer means a dead connection: end the reader too,
+            // rather than keep listing a peer nothing can reach.
+            writer_cancel.cancel();
             let _ = wr.shutdown().await;
         });
 
-        // Reader.
+        // Reader. `read_packet` is not cancel-safe: dropped halfway through a
+        // chunk it loses the bytes already read and the stream falls out of
+        // step. So frames are read whole in their own task and handed over.
+        let (packets_tx, mut packets) = mpsc::channel::<Result<Packet, Error>>(1);
+        let reader = tokio::spawn(async move {
+            loop {
+                let pkt = match timeout(READ_TIMEOUT, read_packet(&mut rd)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(Error::Protocol("peer went silent".into())),
+                };
+                let failed = pkt.is_err();
+                if packets_tx.send(pkt).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
         let mut incoming: HashMap<String, Incoming> = HashMap::new();
         let result: Result<(), Error> = async {
             let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -940,14 +1067,15 @@ impl Node {
                         let _ = tx.try_send(Arc::new(Packet::frame(Frame::Ping)));
                         self.expire_incoming(&id, &mut incoming).await;
                     }
-                    pkt = timeout(READ_TIMEOUT, read_packet(&mut rd)) => {
-                        let pkt = pkt.map_err(|_| Error::Protocol("peer went silent".into()))??;
+                    pkt = packets.recv() => {
+                        let pkt = pkt.ok_or_else(|| Error::Protocol("reader stopped".into()))??;
                         self.handle_packet(&id, &tx, pkt, &mut incoming).await;
                     }
                 }
             }
         }
         .await;
+        reader.abort();
 
         // Whatever was still streaming in is lost; tell everyone downstream.
         for (mid, inc) in incoming.drain() {
@@ -1208,6 +1336,7 @@ impl Node {
                 inc.message.from_name
             );
             let _ = tokio::fs::remove_file(&partial).await;
+            self.seen.lock().unwrap().remove(&id);
             self.emit(Event::TransferFailed {
                 message_id: id,
                 peer: from.clone(),
@@ -1244,9 +1373,19 @@ impl Node {
         for t in inc.forward.drain(..) {
             let _ = t.tx.try_send(abort.clone());
         }
-        if let Some((f, partial)) = inc.file.take() {
-            drop(f);
-            let _ = tokio::fs::remove_file(&partial).await;
+        // The partial file goes before the id is forgotten: a copy taken
+        // after that writes to this same path and must keep its file.
+        let had_file = match inc.file.take() {
+            Some((f, partial)) => {
+                drop(f);
+                let _ = tokio::fs::remove_file(&partial).await;
+                true
+            }
+            None => false,
+        };
+        // Nothing was delivered: take the message again if the sender retries.
+        self.seen.lock().unwrap().remove(&id);
+        if had_file {
             tracing::warn!(
                 "attachment from {} not received: {reason}",
                 inc.message.from_name

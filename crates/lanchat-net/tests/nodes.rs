@@ -409,6 +409,165 @@ async fn interrupted_transfer_leaves_no_partial_file() {
     assert!(a.messages().is_empty());
 }
 
+/// Forward TCP from a local port to `to`, passing at most `bytes_per_tick`
+/// bytes every `tick` in each direction, like a slow Wi-Fi link. Returns
+/// the port to dial and a switch that drops every connection open at the
+/// time (new ones are still accepted).
+async fn slow_proxy(
+    to: std::net::SocketAddr,
+    bytes_per_tick: usize,
+    tick: Duration,
+) -> (u16, std::sync::Arc<tokio::sync::Notify>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let cut = std::sync::Arc::new(tokio::sync::Notify::new());
+    let cut_all = cut.clone();
+    tokio::spawn(async move {
+        while let Ok((inbound, _)) = listener.accept().await {
+            let Ok(outbound) = tokio::net::TcpStream::connect(to).await else {
+                continue;
+            };
+            let (ir, iw) = inbound.into_split();
+            let (or, ow) = outbound.into_split();
+            for (mut r, mut w) in [(ir, ow), (or, iw)] {
+                let cut = cut.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; bytes_per_tick];
+                    let pipe = async {
+                        loop {
+                            let n = match r.read(&mut buf).await {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => n,
+                            };
+                            if w.write_all(&buf[..n]).await.is_err() {
+                                break;
+                            }
+                            tokio::time::sleep(tick).await;
+                        }
+                    };
+                    tokio::select! {
+                        _ = pipe => {}
+                        _ = cut.notified() => {}
+                    }
+                    let _ = w.shutdown().await;
+                });
+            }
+        }
+    });
+    (port, cut_all)
+}
+
+/// A transfer slow enough to outlast a keepalive ping still arrives. A ping
+/// that fires while a chunk is half read must not cost the bytes already
+/// read, or the stream falls out of step and the connection drops near the
+/// end of the file.
+#[tokio::test]
+async fn slow_transfer_survives_keepalive_ping() {
+    let (a, mut a_rx, _da) = spawn("Alice", false, vec![]).await;
+    let alice: std::net::SocketAddr = format!("127.0.0.1:{}", a.port()).parse().unwrap();
+    // About 1 MB/s.
+    let (port, _) = slow_proxy(alice, 16 * 1024, Duration::from_millis(15)).await;
+    let (b, mut b_rx, db) = spawn("Bob", false, vec![format!("127.0.0.1:{port}")]).await;
+    wait_for(&mut a_rx, "Bob at Alice", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+    wait_for(&mut b_rx, "Alice at Bob", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+
+    // Takes about 30 s through the proxy, past the first ping at 25 s.
+    let src = db.path().join("photo.jpg");
+    let payload: Vec<u8> = (0..32 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+    let sent = b
+        .send_file(Some(a.identity.id.clone()), &src)
+        .await
+        .unwrap();
+
+    let got = loop {
+        let ev = timeout(Duration::from_secs(90), a_rx.recv())
+            .await
+            .expect("timed out at Alice")
+            .expect("closed");
+        match ev {
+            Event::Message { message } => break message,
+            Event::TransferFailed { reason, .. } => panic!("transfer failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(got.id, sent.id);
+    assert_eq!(
+        std::fs::read(got.attachment.unwrap().path.unwrap()).unwrap(),
+        payload
+    );
+}
+
+/// A transfer cut off halfway can be sent again under the same message id
+/// once the peer is back, and the receiver takes it.
+#[tokio::test]
+async fn failed_transfer_can_be_resent() {
+    let (a, mut a_rx, _da) = spawn("Alice", false, vec![]).await;
+    let alice: std::net::SocketAddr = format!("127.0.0.1:{}", a.port()).parse().unwrap();
+    // About 16 MB/s: slow enough to cut mid-file, fast enough for a test.
+    let (port, cut) = slow_proxy(alice, 64 * 1024, Duration::from_millis(4)).await;
+    let (b, mut b_rx, db) = spawn("Bob", false, vec![format!("127.0.0.1:{port}")]).await;
+    let peer_online = |e: &Event| matches!(e, Event::PeerOnline { .. });
+    wait_for(&mut a_rx, "Bob at Alice", peer_online).await;
+    wait_for(&mut b_rx, "Alice at Bob", peer_online).await;
+
+    let src = db.path().join("photo.jpg");
+    let payload: Vec<u8> = (0..16 * 1024 * 1024u32).map(|i| (i % 249) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+    let sent = b
+        .send_file(Some(a.identity.id.clone()), &src)
+        .await
+        .unwrap();
+    wait_for(&mut a_rx, "first progress at Alice", |e| {
+        matches!(e, Event::Transfer { direction: TransferDirection::Receiving, done, .. } if *done > 0)
+    })
+    .await;
+    cut.notify_waiters();
+    wait_for(&mut a_rx, "failure at Alice", |e| {
+        matches!(e, Event::TransferFailed { .. })
+    })
+    .await;
+    let failed = wait_for(&mut b_rx, "failure at Bob", |e| {
+        matches!(e, Event::TransferFailed { .. })
+    })
+    .await;
+    let Event::TransferFailed {
+        message_id, peer, ..
+    } = failed
+    else {
+        unreachable!()
+    };
+    assert_eq!(message_id, sent.id);
+
+    // Bob redials through the proxy on its own.
+    wait_for(&mut b_rx, "Alice back at Bob", peer_online).await;
+    b.resend(&sent.id, &[peer]).await.unwrap();
+    let got = loop {
+        let ev = timeout(Duration::from_secs(30), a_rx.recv())
+            .await
+            .expect("timed out at Alice")
+            .expect("closed");
+        match ev {
+            Event::Message { message } => break message,
+            Event::TransferFailed { reason, .. } => panic!("resend failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert_eq!(got.id, sent.id);
+    assert_eq!(
+        std::fs::read(got.attachment.unwrap().path.unwrap()).unwrap(),
+        payload
+    );
+    assert_eq!(a.messages().len(), 1);
+}
+
 /// A scan probe learns who is at an address without the probed node ever
 /// seeing a peer come online.
 #[tokio::test]
