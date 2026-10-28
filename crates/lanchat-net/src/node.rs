@@ -53,6 +53,10 @@ struct Conn {
     serial: u64,
     info: PeerInfo,
     initiated_by_me: bool,
+    /// The address we dialed, for outbound connections. Can differ from
+    /// `info.addr` (the peer's IP plus the port it reports), e.g. behind a
+    /// port forward.
+    dialed: Option<SocketAddr>,
     /// Control frames: written ahead of anything waiting in `data_tx`.
     tx: mpsc::Sender<Arc<Packet>>,
     /// Attachment chunks; bounded so a transfer backs up at the sender
@@ -753,10 +757,9 @@ impl Node {
                     continue;
                 }
                 if peer_id.is_none()
-                    && inner
-                        .conns
-                        .values()
-                        .any(|c| c.info.addr.as_deref() == Some(&addr.to_string()))
+                    && inner.conns.values().any(|c| {
+                        c.dialed == Some(addr) || c.info.addr.as_deref() == Some(&addr.to_string())
+                    })
                 {
                     continue;
                 }
@@ -873,6 +876,7 @@ impl Node {
                     serial,
                     info: info.clone(),
                     initiated_by_me,
+                    dialed: initiated_by_me.then_some(remote),
                     tx: tx.clone(),
                     data_tx,
                     cancel: cancel.clone(),
