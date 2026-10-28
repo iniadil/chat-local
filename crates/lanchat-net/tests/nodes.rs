@@ -366,3 +366,65 @@ async fn interrupted_transfer_leaves_no_partial_file() {
     assert!(leftovers.is_empty(), "left {:?}", leftovers);
     assert!(a.messages().is_empty());
 }
+
+/// A scan probe learns who is at an address without the probed node ever
+/// seeing a peer come online.
+#[tokio::test]
+async fn probe_reads_hello_without_registering() {
+    let (a, mut a_rx, _da) = spawn("Dapur", false, vec![]).await;
+    let (b, _b_rx, _db) = spawn("Kantor", true, vec![]).await;
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", a.port()).parse().unwrap();
+
+    let found = lanchat_net::scan::probe(addr, &b.identity.id)
+        .await
+        .unwrap()
+        .expect("a is not b");
+    assert_eq!(found.id, a.identity.id);
+    assert_eq!(found.name, "Dapur");
+    assert_eq!(found.addr, addr.to_string());
+    assert!(!found.relay);
+    assert_eq!(found.via, FoundVia::Scan);
+    assert!(!found.connected);
+
+    // Probing our own address is reported as "nobody", not as a peer.
+    assert!(lanchat_net::scan::probe(addr, &a.identity.id)
+        .await
+        .unwrap()
+        .is_none());
+
+    // The probed node saw nothing: no peer event, no connection.
+    let quiet = timeout(Duration::from_millis(500), a_rx.recv()).await;
+    assert!(quiet.is_err(), "unexpected event: {quiet:?}");
+    assert!(a.peers().is_empty());
+
+    // The relay flag travels with the hello too.
+    let addr_b: std::net::SocketAddr = format!("127.0.0.1:{}", b.port()).parse().unwrap();
+    let found_b = lanchat_net::scan::probe(addr_b, &a.identity.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(found_b.name, "Kantor");
+    assert!(found_b.relay);
+
+    // A silent port is an error, not a hang.
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let silent = l.local_addr().unwrap();
+    let t0 = std::time::Instant::now();
+    assert!(lanchat_net::scan::probe(silent, &a.identity.id)
+        .await
+        .is_err());
+    assert!(t0.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn subnets_are_deduplicated_and_filtered() {
+    use std::net::Ipv4Addr;
+    let s = lanchat_net::scan::subnets_of(&[
+        Ipv4Addr::new(192, 168, 1, 23),
+        Ipv4Addr::new(192, 168, 1, 99),
+        Ipv4Addr::new(10, 0, 5, 7),
+        Ipv4Addr::new(127, 0, 0, 1),
+        Ipv4Addr::new(169, 254, 3, 3),
+    ]);
+    assert_eq!(s, vec![[10, 0, 5], [192, 168, 1]]);
+}

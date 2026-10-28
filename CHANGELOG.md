@@ -6,6 +6,17 @@ All notable changes to ChatLocal are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- A welcome screen on first launch asks for your name or the device's name
+  (prefilled with the computer name), so people recognise you when you show
+  up on their network. The name can still be changed in Settings.
+- *Add computer…* now finds other ChatLocal installations for you. It lists
+  what mDNS/Bonjour announced and, in addition, probes every address of the
+  local `/24` subnets at the ChatLocal port, which also works on networks
+  that block mDNS. Each result shows the name and address with a *Connect*
+  button; typing an address by hand remains available underneath. A probe
+  only reads the other side's hello and never registers as a peer there.
+
 ### Changed
 - Dropped, picked and pasted files no longer send immediately. They wait as
   previews above the message box (thumbnail for images) and go out when you

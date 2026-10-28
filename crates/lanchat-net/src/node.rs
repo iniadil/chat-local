@@ -92,8 +92,8 @@ struct Inner {
     rosters: HashMap<PeerId, Vec<RosterEntry>>,
     /// Peers reachable only through a relay, derived from `rosters`.
     via_relay: HashMap<PeerId, PeerInfo>,
-    /// Addresses learned from discovery, by peer id.
-    known_addrs: HashMap<PeerId, Vec<SocketAddr>>,
+    /// Peers learned from discovery, by peer id.
+    known: HashMap<PeerId, Discovered>,
     /// Addresses with a connection attempt in flight.
     connecting: HashSet<SocketAddr>,
     /// Addresses that turned out to be this very node (someone typed our own
@@ -638,7 +638,63 @@ impl Node {
 
     async fn on_discovered(&self, d: Discovered) {
         let mut inner = self.inner.lock().unwrap();
-        inner.known_addrs.insert(d.id.clone(), d.addrs);
+        inner.known.insert(d.id.clone(), d);
+    }
+
+    /// Peers that announced themselves with mDNS, connected or not.
+    pub fn discovered(&self) -> Vec<FoundPeer> {
+        let inner = self.inner.lock().unwrap();
+        let mut v: Vec<FoundPeer> = inner
+            .known
+            .values()
+            .filter_map(|d| {
+                let addr = d.addrs.first()?;
+                let conn = inner.conns.get(&d.id);
+                Some(FoundPeer {
+                    id: d.id.clone(),
+                    name: conn
+                        .map(|c| c.info.name.clone())
+                        .unwrap_or_else(|| d.name.clone()),
+                    addr: conn
+                        .and_then(|c| c.info.addr.clone())
+                        .unwrap_or_else(|| addr.to_string()),
+                    relay: conn.map(|c| c.info.relay).unwrap_or(false),
+                    via: FoundVia::Mdns,
+                    connected: conn.is_some(),
+                })
+            })
+            .collect();
+        v.sort_by_key(|p| p.name.to_lowercase());
+        v
+    }
+
+    /// Actively look for ChatLocal on every `/24` this machine sits in, on
+    /// our own port and the default one. Takes a few seconds. The result is
+    /// merged with what mDNS already knows, one entry per peer.
+    pub async fn scan_lan(&self) -> Vec<FoundPeer> {
+        let local: Vec<std::net::Ipv4Addr> = crate::local_ipv4_addresses()
+            .iter()
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        let subnets = crate::scan::subnets_of(&local);
+        let ports = [self.port, DEFAULT_PORT];
+        let scanned = crate::scan::scan(&subnets, &ports, &self.identity.id).await;
+
+        let mut out = self.discovered();
+        let inner = self.inner.lock().unwrap();
+        for mut p in scanned {
+            if out.iter().any(|o| o.id == p.id) {
+                continue;
+            }
+            if let Some(c) = inner.conns.get(&p.id) {
+                p.connected = true;
+                p.name = c.info.name.clone();
+            }
+            out.push(p);
+        }
+        drop(inner);
+        out.sort_by_key(|p| p.name.to_lowercase());
+        out
     }
 
     /// Try every address we should be connected to but are not.
@@ -646,7 +702,7 @@ impl Node {
         let mut targets: Vec<(Option<PeerId>, String)> = Vec::new();
         {
             let inner = self.inner.lock().unwrap();
-            for (id, addrs) in &inner.known_addrs {
+            for (id, d) in &inner.known {
                 if inner.conns.contains_key(id) {
                     continue;
                 }
@@ -655,7 +711,7 @@ impl Node {
                 if self.identity.id > *id {
                     continue;
                 }
-                if let Some(a) = addrs.first() {
+                if let Some(a) = d.addrs.first() {
                     targets.push((Some(id.clone()), a.to_string()));
                 }
             }

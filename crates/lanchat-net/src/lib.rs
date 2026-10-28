@@ -9,6 +9,7 @@
 
 pub mod discovery;
 pub mod node;
+pub mod scan;
 pub mod store;
 pub mod types;
 pub mod wire;

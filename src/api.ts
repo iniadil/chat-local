@@ -41,6 +41,16 @@ export interface Peer {
   via?: string;
 }
 
+/** A ChatLocal installation seen on the network, connected or not. */
+export interface FoundPeer {
+  id: string;
+  name: string;
+  addr: string;
+  relay: boolean;
+  via: "mdns" | "scan";
+  connected: boolean;
+}
+
 export interface Settings {
   display_name: string;
   port: number;
@@ -58,6 +68,8 @@ export interface Snapshot {
   messages: Message[];
   data_dir: string;
   start_error: string | null;
+  /** No settings saved yet: ask for a name before anything else. */
+  first_run: boolean;
 }
 
 export type NetEvent =
@@ -80,6 +92,8 @@ export const api = {
   sendBlob: (to: string | null, blob: { file_name: string; mime: string; data: string; duration_ms?: number }) =>
     invoke<Message>("send_blob", { to, blob }),
   connectPeer: (target: string) => invoke<void>("connect_peer", { target }),
+  discoveredPeers: () => invoke<FoundPeer[]>("discovered_peers"),
+  scanNetwork: () => invoke<FoundPeer[]>("scan_network"),
   openAttachment: (messageId: string) => invoke<void>("open_attachment", { messageId }),
   revealAttachment: (messageId: string) => invoke<void>("reveal_attachment", { messageId }),
   clearHistory: () => invoke<void>("clear_history"),
