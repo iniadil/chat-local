@@ -703,10 +703,13 @@ impl Node {
         out
     }
 
-    /// Replace the addresses the reconnect loop dials. Existing connections
-    /// are kept, including ones to addresses no longer in the list.
-    pub fn set_manual_peers(&self, peers: Vec<String>) {
+    /// Replace the addresses the reconnect loop dials and dial any new ones
+    /// right away. Existing connections are kept, including ones to
+    /// addresses no longer in the list.
+    pub fn set_manual_peers(self: &Arc<Self>, peers: Vec<String>) {
         *self.manual_peers.lock().unwrap() = peers;
+        let node = self.clone();
+        tokio::spawn(async move { node.connect_pending().await });
     }
 
     /// Try every address we should be connected to but are not.

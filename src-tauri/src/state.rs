@@ -14,6 +14,9 @@ pub struct AppState {
     pub node: Mutex<Option<Arc<Node>>>,
     /// Last error from starting the node, shown in the UI.
     pub start_error: Mutex<Option<String>>,
+    /// Serializes `save_settings` so one call never compares against, or
+    /// restarts underneath, another call that is still in progress.
+    pub save_lock: tokio::sync::Mutex<()>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -33,6 +36,7 @@ impl AppState {
             settings: Mutex::new(settings),
             node: Mutex::new(None),
             start_error: Mutex::new(None),
+            save_lock: tokio::sync::Mutex::new(()),
         })
     }
 
