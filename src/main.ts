@@ -762,7 +762,11 @@ async function refreshFound() {
   scanRunning = true;
   setScanStatus("scanning");
   try {
-    mergeFound(await api.scanNetwork());
+    // The scan already includes what mDNS knows, so it is the whole list:
+    // a computer that has gone away since the last scan must drop out.
+    const list = await api.scanNetwork();
+    found.clear();
+    mergeFound(list);
     setScanStatus("done");
   } catch (e) {
     setScanStatus("failed");
@@ -898,8 +902,14 @@ function openWelcome() {
 async function submitWelcome(ev: Event) {
   ev.preventDefault();
   const f = $<HTMLFormElement>("welcome-form");
-  const name = (f.elements.namedItem("display_name") as HTMLInputElement).value.trim();
-  if (!name) return;
+  const input = f.elements.namedItem("display_name") as HTMLInputElement;
+  const name = input.value.trim();
+  if (!name) {
+    // Spaces only satisfy `required`; say why nothing happens.
+    input.value = "";
+    f.reportValidity();
+    return;
+  }
   const btn = f.querySelector<HTMLButtonElement>("button[type=submit]")!;
   btn.disabled = true;
   try {
@@ -908,7 +918,17 @@ async function submitWelcome(ev: Event) {
     $("welcome-modal").hidden = true;
     $("input").focus();
   } catch (e) {
-    toast(errText(e), true);
+    // The name may be on disk even though the network failed to restart
+    // (port in use, ...). This dialog has no other way out, so check: once
+    // settings exist the error belongs to the main window, not here.
+    const snap = await api.snapshot().catch(() => null);
+    if (snap && !snap.first_run) {
+      applySnapshot(snap); // reports start_error itself
+      $("welcome-modal").hidden = true;
+      $("input").focus();
+    } else {
+      toast(errText(e), true);
+    }
   } finally {
     btn.disabled = false;
   }

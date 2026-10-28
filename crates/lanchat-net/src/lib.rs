@@ -37,18 +37,17 @@ pub enum Error {
     Other(String),
 }
 
-/// Local, non-loopback IPv4 addresses, for showing the user what to type on
-/// other machines.
-pub fn local_ipv4_addresses() -> Vec<String> {
+/// Local, non-loopback IPv4 addresses, sorted and deduplicated.
+pub fn local_ipv4() -> Vec<std::net::Ipv4Addr> {
     match local_ip_address::list_afinet_netifas() {
         Ok(list) => {
-            let mut v: Vec<String> = list
+            let mut v: Vec<std::net::Ipv4Addr> = list
                 .into_iter()
                 .filter_map(|(_, ip)| match ip {
                     std::net::IpAddr::V4(ip)
                         if !ip.is_loopback() && !ip.is_link_local() && !ip.is_unspecified() =>
                     {
-                        Some(ip.to_string())
+                        Some(ip)
                     }
                     _ => None,
                 })
@@ -59,4 +58,10 @@ pub fn local_ipv4_addresses() -> Vec<String> {
         }
         Err(_) => Vec::new(),
     }
+}
+
+/// [`local_ipv4`] as strings, for showing the user what to type on other
+/// machines.
+pub fn local_ipv4_addresses() -> Vec<String> {
+    local_ipv4().iter().map(|ip| ip.to_string()).collect()
 }

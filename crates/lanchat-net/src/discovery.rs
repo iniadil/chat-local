@@ -19,6 +19,15 @@ pub struct Discovered {
     pub addrs: Vec<SocketAddr>,
 }
 
+/// What the browser reports.
+#[derive(Clone, Debug)]
+pub enum DiscoveryEvent {
+    /// A peer announced itself (or re-announced with new addresses).
+    Found(Discovered),
+    /// A peer's announcement went away: it left, or its records expired.
+    Lost(PeerId),
+}
+
 pub struct Discovery {
     daemon: ServiceDaemon,
     fullname: String,
@@ -26,12 +35,13 @@ pub struct Discovery {
 
 impl Discovery {
     /// Announce ourselves and start browsing. Discovered peers (never
-    /// ourselves) are delivered on the returned channel.
+    /// ourselves), and their departures, are delivered on the returned
+    /// channel.
     pub fn start(
         id: &PeerId,
         name: &str,
         port: u16,
-    ) -> Result<(Self, mpsc::Receiver<Discovered>), Error> {
+    ) -> Result<(Self, mpsc::Receiver<DiscoveryEvent>), Error> {
         let daemon = ServiceDaemon::new().map_err(|e| Error::Discovery(e.to_string()))?;
 
         let short: String = id
@@ -59,44 +69,57 @@ impl Discovery {
         let my_id = id.clone();
         std::thread::Builder::new()
             .name("mdns-browse".into())
-            .spawn(move || loop {
-                match browser.recv_timeout(Duration::from_secs(1)) {
-                    Ok(ServiceEvent::ServiceResolved(svc)) => {
-                        let Some(pid) = svc.get_property_val_str("id") else {
-                            continue;
-                        };
-                        if pid == my_id {
-                            continue;
+            .spawn(move || {
+                // Removal events only carry the service name, so remember
+                // which peer id each resolved name belongs to.
+                let mut ids_by_name: HashMap<String, PeerId> = HashMap::new();
+                loop {
+                    match browser.recv_timeout(Duration::from_secs(1)) {
+                        Ok(ServiceEvent::ServiceResolved(svc)) => {
+                            let Some(pid) = svc.get_property_val_str("id") else {
+                                continue;
+                            };
+                            if pid == my_id {
+                                continue;
+                            }
+                            ids_by_name.insert(svc.get_fullname().to_string(), pid.to_string());
+                            let port = svc.get_port();
+                            let mut addrs: Vec<SocketAddr> = svc
+                                .get_addresses()
+                                .iter()
+                                .map(|ip| SocketAddr::new(ip.to_ip_addr(), port))
+                                .filter(|a| !a.ip().is_loopback())
+                                .collect();
+                            // Prefer IPv4: it is what people see in their router and
+                            // what the manual-peer field expects.
+                            addrs.sort_by_key(|a| matches!(a.ip(), IpAddr::V6(_)));
+                            if addrs.is_empty() {
+                                continue;
+                            }
+                            let d = Discovered {
+                                id: pid.to_string(),
+                                name: svc.get_property_val_str("name").unwrap_or("").to_string(),
+                                addrs,
+                            };
+                            if tx.blocking_send(DiscoveryEvent::Found(d)).is_err() {
+                                break;
+                            }
                         }
-                        let port = svc.get_port();
-                        let mut addrs: Vec<SocketAddr> = svc
-                            .get_addresses()
-                            .iter()
-                            .map(|ip| SocketAddr::new(ip.to_ip_addr(), port))
-                            .filter(|a| !a.ip().is_loopback())
-                            .collect();
-                        // Prefer IPv4: it is what people see in their router and
-                        // what the manual-peer field expects.
-                        addrs.sort_by_key(|a| matches!(a.ip(), IpAddr::V6(_)));
-                        if addrs.is_empty() {
-                            continue;
+                        Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
+                            if let Some(pid) = ids_by_name.remove(&fullname) {
+                                if tx.blocking_send(DiscoveryEvent::Lost(pid)).is_err() {
+                                    break;
+                                }
+                            }
                         }
-                        let d = Discovered {
-                            id: pid.to_string(),
-                            name: svc.get_property_val_str("name").unwrap_or("").to_string(),
-                            addrs,
-                        };
-                        if tx.blocking_send(d).is_err() {
-                            break;
+                        Ok(_) => {}
+                        Err(mdns_sd::RecvTimeoutError::Timeout) => {
+                            if tx.is_closed() {
+                                break;
+                            }
                         }
+                        Err(mdns_sd::RecvTimeoutError::Disconnected) => break,
                     }
-                    Ok(_) => {}
-                    Err(mdns_sd::RecvTimeoutError::Timeout) => {
-                        if tx.is_closed() {
-                            break;
-                        }
-                    }
-                    Err(mdns_sd::RecvTimeoutError::Disconnected) => break,
                 }
             })
             .map_err(|e| Error::Discovery(e.to_string()))?;

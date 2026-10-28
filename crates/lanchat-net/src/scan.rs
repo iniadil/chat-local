@@ -11,8 +11,8 @@
 //! Larger subnets still work for the hosts that share the first three octets
 //! with this machine; the rest can be added by address.
 
-use crate::types::{FoundPeer, FoundVia, PeerId, PROTOCOL_VERSION};
-use crate::wire::{read_packet, Frame};
+use crate::types::{FoundPeer, FoundVia, PeerId};
+use crate::wire::read_packet;
 use crate::Error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -42,29 +42,15 @@ pub async fn probe(addr: SocketAddr, my_id: &PeerId) -> Result<Option<FoundPeer>
     let pkt = timeout(PROBE_HELLO_TIMEOUT, read_packet(&mut rd))
         .await
         .map_err(|_| Error::Protocol("no hello".into()))??;
-    let Frame::Hello {
-        id,
-        name,
-        port,
-        version,
-        relay,
-    } = pkt.frame
-    else {
-        return Err(Error::Protocol("expected hello".into()));
-    };
-    if version != PROTOCOL_VERSION {
-        return Err(Error::Protocol(format!(
-            "peer speaks protocol v{version}, we speak v{PROTOCOL_VERSION}"
-        )));
-    }
-    if &id == my_id {
+    let hello = pkt.frame.into_hello()?;
+    if &hello.id == my_id {
         return Ok(None);
     }
     Ok(Some(FoundPeer {
-        id,
-        name,
-        addr: SocketAddr::new(addr.ip(), port).to_string(),
-        relay,
+        id: hello.id,
+        name: hello.name,
+        addr: SocketAddr::new(addr.ip(), hello.port).to_string(),
+        relay: hello.relay,
         via: FoundVia::Scan,
         connected: false,
     }))
@@ -85,8 +71,8 @@ pub fn subnets_of(local: &[Ipv4Addr]) -> Vec<[u8; 3]> {
     v
 }
 
-/// Probe every host of every subnet on every port. Results come back sorted
-/// by name, one entry per peer id (the first address that answered wins).
+/// Probe every host of every subnet on every port. One entry per peer id
+/// (the first address that answered wins), in no particular order.
 pub async fn scan(subnets: &[[u8; 3]], ports: &[u16], my_id: &PeerId) -> Vec<FoundPeer> {
     let mut ports: Vec<u16> = ports.iter().copied().filter(|p| *p != 0).collect();
     ports.sort();
@@ -123,6 +109,5 @@ pub async fn scan(subnets: &[[u8; 3]], ports: &[u16], my_id: &PeerId) -> Vec<Fou
             }
         }
     }
-    found.sort_by_key(|p| p.name.to_lowercase());
     found
 }
