@@ -28,8 +28,8 @@ export interface FileInfo {
   file_name: string;
   size: number;
   mime: string;
-  /** data: URL for images small enough to preview. */
-  preview?: string;
+  /** data: URL for images small enough to preview; null otherwise. */
+  preview: string | null;
 }
 
 export interface Peer {

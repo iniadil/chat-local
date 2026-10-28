@@ -132,6 +132,12 @@ pub async fn file_info(path: String) -> Result<FileInfo, String> {
     if !meta.is_file() {
         return Err(format!("{path}: not a file"));
     }
+    // Reject oversized files now, so the user hears about it when queueing
+    // rather than when pressing Send.
+    if meta.len() > lanchat_net::MAX_ATTACHMENT_BYTES {
+        let e = lanchat_net::Error::AttachmentTooLarge(meta.len());
+        return Err(format!("{path}: {e}"));
+    }
     let mime = mime_for(&p);
     let file_name = p
         .file_name()
