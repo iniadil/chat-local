@@ -4,6 +4,18 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-28
+
+### Fixed
+
+- Voice notes on macOS. The 0.1.1 and 0.2.0 bundles were signed with the
+  hardened runtime but without the microphone entitlement, so macOS refused
+  the microphone silently instead of asking for permission. The bundle now
+  carries `com.apple.security.device.audio-input`, and the first click on
+  the microphone shows the normal permission dialog.
+- The install steps explain the macOS 15 "could not verify" dialog and the
+  *Open Anyway* route.
+
 ## [0.2.0] - 2026-10-28
 
 ### Changed
@@ -56,6 +68,7 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.2.1]: https://github.com/iniadil/chat-local/releases/tag/v0.2.1
 [0.2.0]: https://github.com/iniadil/chat-local/releases/tag/v0.2.0
 [0.1.1]: https://github.com/iniadil/chat-local/releases/tag/v0.1.1
 [0.1.0]: https://github.com/iniadil/chat-local/releases/tag/v0.1.0
