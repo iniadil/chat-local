@@ -37,11 +37,13 @@ impl Store {
         if messages.len() > MAX_IN_MEMORY {
             messages.drain(..messages.len() - MAX_IN_MEMORY);
         }
-        Ok(Self {
+        let store = Self {
             log_path,
             files_dir,
             messages,
-        })
+        };
+        store.sweep_partials();
+        Ok(store)
     }
 
     pub fn files_dir(&self) -> &Path {
@@ -79,6 +81,21 @@ impl Store {
         Ok(())
     }
 
+    /// Where the attachment of `message_id` lives once complete.
+    pub fn attachment_path(&self, message_id: &str, file_name: &str) -> PathBuf {
+        let short = message_id.chars().take(8).collect::<String>();
+        self.files_dir
+            .join(format!("{short}-{}", sanitize_file_name(file_name)))
+    }
+
+    /// Where the attachment of `message_id` is written while it streams in.
+    /// Hidden and suffixed so a half file is never mistaken for a whole one.
+    pub fn partial_path(&self, message_id: &str, file_name: &str) -> PathBuf {
+        let short = message_id.chars().take(8).collect::<String>();
+        self.files_dir
+            .join(format!(".{short}-{}.part", sanitize_file_name(file_name)))
+    }
+
     /// Write attachment bytes to the files directory and return the path.
     pub fn save_attachment(
         &self,
@@ -86,13 +103,65 @@ impl Store {
         file_name: &str,
         bytes: &[u8],
     ) -> Result<PathBuf, Error> {
-        let short = message_id.chars().take(8).collect::<String>();
-        let path = self
-            .files_dir
-            .join(format!("{short}-{}", sanitize_file_name(file_name)));
+        let path = self.attachment_path(message_id, file_name);
         fs::write(&path, bytes)?;
         Ok(path)
     }
+
+    /// Remove leftover `.part` files from transfers that never finished.
+    pub fn sweep_partials(&self) {
+        let Ok(entries) = fs::read_dir(&self.files_dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') && name.ends_with(".part") {
+                let _ = fs::remove_file(e.path());
+            }
+        }
+    }
+}
+
+/// Copy `src` into `dest`, returning `(size, sha256)`. Reads in chunks, so
+/// memory use does not depend on the file size.
+pub async fn copy_hashed(src: &Path, dest: &Path) -> Result<(u64, String), Error> {
+    let mut to = tokio::fs::File::create(dest).await?;
+    read_hashed(src, Some(&mut to)).await
+}
+
+/// SHA-256 of a file on disk, read in chunks.
+pub async fn hash_file(path: &Path) -> Result<(u64, String), Error> {
+    read_hashed(path, None).await
+}
+
+/// Read `src` in [`CHUNK_BYTES`](crate::types::CHUNK_BYTES) pieces, hashing
+/// every byte and copying it into `dest` when one is given.
+async fn read_hashed(
+    src: &Path,
+    mut dest: Option<&mut tokio::fs::File>,
+) -> Result<(u64, String), Error> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut from = tokio::fs::File::open(src).await?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; crate::types::CHUNK_BYTES];
+    let mut size = 0u64;
+    loop {
+        let n = from.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        if let Some(to) = dest.as_mut() {
+            to.write_all(&buf[..n]).await?;
+        }
+        size += n as u64;
+    }
+    if let Some(to) = dest {
+        to.flush().await?;
+    }
+    Ok((size, hex::encode(hasher.finalize())))
 }
 
 /// Keep a file name safe to write anywhere: strip path separators and control

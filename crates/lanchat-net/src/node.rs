@@ -2,7 +2,7 @@
 //! public send API.
 
 use crate::discovery::{Discovered, Discovery};
-use crate::store::Store;
+use crate::store::{copy_hashed, hash_file, Store};
 use crate::types::*;
 use crate::wire::{read_packet, write_packet, Frame, Packet, RosterEntry};
 use crate::Error;
@@ -12,8 +12,9 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tokio::io::{AsyncWriteExt, BufReader, BufWriter};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::fs::File;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
@@ -25,7 +26,21 @@ const READ_TIMEOUT: Duration = Duration::from_secs(90);
 const PING_INTERVAL: Duration = Duration::from_secs(25);
 const RECONNECT_INTERVAL: Duration = Duration::from_secs(5);
 const SEEN_CAPACITY: usize = 8192;
+/// Control frames (text, hello, pings, transfer announcements) per connection.
 const OUTBOX_CAPACITY: usize = 256;
+/// Attachment chunks queued per connection. Small on purpose: this, times
+/// [`CHUNK_BYTES`], is the memory one connection may hold for transfers.
+const DATA_CAPACITY: usize = 8;
+/// How long a relay waits for a slow downstream peer to take a chunk before
+/// giving up on forwarding that transfer to it.
+const FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Transfers one connection may have in flight toward us at once.
+const MAX_INCOMING_PER_CONN: usize = 16;
+/// An incoming transfer that has not seen a chunk for this long is dropped,
+/// so a lost `End`/`Abort` cannot pin a `.part` file and a slot forever.
+const INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Emit a progress event every this many bytes.
+const PROGRESS_STEP: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct NodeConfig {
@@ -38,8 +53,36 @@ struct Conn {
     serial: u64,
     info: PeerInfo,
     initiated_by_me: bool,
+    /// Control frames: written ahead of anything waiting in `data_tx`.
     tx: mpsc::Sender<Arc<Packet>>,
+    /// Attachment chunks; bounded so a transfer backs up at the sender
+    /// instead of in memory.
+    data_tx: mpsc::Sender<Arc<Packet>>,
     cancel: CancellationToken,
+}
+
+/// A connection that accepted a transfer announcement and will take its
+/// chunks.
+#[derive(Clone)]
+struct Target {
+    id: PeerId,
+    tx: mpsc::Sender<Arc<Packet>>,
+    data_tx: mpsc::Sender<Arc<Packet>>,
+}
+
+/// An attachment arriving on one connection.
+struct Incoming {
+    message: Message,
+    total: u64,
+    received: u64,
+    hasher: Sha256,
+    /// Open `.part` file, when this node is a recipient.
+    file: Option<(File, PathBuf)>,
+    /// Connections this relay forwards the chunks to.
+    forward: Vec<Target>,
+    last_progress: u64,
+    /// When the announcement or the latest chunk arrived.
+    last_activity: Instant,
 }
 
 #[derive(Default)]
@@ -263,14 +306,25 @@ impl Node {
         if text.is_empty() {
             return Err(Error::Other("empty message".into()));
         }
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(Error::Other(format!(
+                "message is longer than {} KB",
+                MAX_TEXT_BYTES / 1024
+            )));
+        }
         let msg = self.new_message(to, Some(text), None);
-        self.route(msg.clone(), Vec::new(), None).await?;
+        self.route(&msg, None)?;
         self.store.lock().unwrap().append(msg.clone())?;
         Ok(msg)
     }
 
-    /// Send a file from disk. The original file stays where it is.
-    pub async fn send_file(&self, to: Option<PeerId>, path: &Path) -> Result<Message, Error> {
+    /// Send a file from disk, streaming it from where it is. The original
+    /// file stays in place and the message refers to it.
+    pub async fn send_file(
+        self: &Arc<Self>,
+        to: Option<PeerId>,
+        path: &Path,
+    ) -> Result<Message, Error> {
         let meta = tokio::fs::metadata(path).await?;
         if !meta.is_file() {
             return Err(Error::Other("not a file".into()));
@@ -278,11 +332,8 @@ impl Node {
         if meta.len() > MAX_ATTACHMENT_BYTES {
             return Err(Error::AttachmentTooLarge(meta.len()));
         }
-        let bytes = tokio::fs::read(path).await?;
-        let file_name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "file".into());
+        let (size, sha256) = hash_file(path).await?;
+        let file_name = file_name_of(path);
         let mime = mime_guess::from_path(path)
             .first_or_octet_stream()
             .essence_str()
@@ -291,21 +342,69 @@ impl Node {
             kind: AttachmentKind::from_mime(&mime),
             file_name,
             mime,
-            size: bytes.len() as u64,
-            sha256: sha256_hex(&bytes),
+            size,
+            sha256,
             duration_ms: None,
             path: Some(path.to_path_buf()),
         };
         let msg = self.new_message(to, None, Some(attachment));
-        self.route(msg.clone(), bytes, None).await?;
-        self.store.lock().unwrap().append(msg.clone())?;
-        Ok(msg)
+        self.send_attachment(msg).await
+    }
+
+    /// Send a file from disk, first copying it into the files directory so
+    /// the message keeps working if the original moves. `mime` overrides
+    /// detection from the extension.
+    pub async fn import_file(
+        self: &Arc<Self>,
+        to: Option<PeerId>,
+        path: &Path,
+        mime: Option<String>,
+    ) -> Result<Message, Error> {
+        let meta = tokio::fs::metadata(path).await?;
+        if !meta.is_file() {
+            return Err(Error::Other("not a file".into()));
+        }
+        if meta.len() > MAX_ATTACHMENT_BYTES {
+            return Err(Error::AttachmentTooLarge(meta.len()));
+        }
+        let file_name = file_name_of(path);
+        let mime = mime.unwrap_or_else(|| {
+            mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .essence_str()
+                .to_string()
+        });
+        let mut msg = self.new_message(to, None, None);
+        let dest = self
+            .store
+            .lock()
+            .unwrap()
+            .attachment_path(&msg.id, &file_name);
+        let sent = async {
+            let (size, sha256) = copy_hashed(path, &dest).await?;
+            msg.attachment = Some(Attachment {
+                kind: AttachmentKind::from_mime(&mime),
+                file_name,
+                mime,
+                size,
+                sha256,
+                duration_ms: None,
+                path: Some(dest.clone()),
+            });
+            self.send_attachment(msg).await
+        }
+        .await;
+        if sent.is_err() {
+            // Nothing refers to the copy: do not leave it in the data folder.
+            let _ = tokio::fs::remove_file(&dest).await;
+        }
+        sent
     }
 
     /// Send bytes produced in memory (a voice note, a pasted image). A copy is
     /// kept in the files directory so the sender can replay it later.
     pub async fn send_bytes(
-        &self,
+        self: &Arc<Self>,
         to: Option<PeerId>,
         file_name: String,
         mime: String,
@@ -330,11 +429,102 @@ impl Node {
                 .lock()
                 .unwrap()
                 .save_attachment(&msg.id, &attachment.file_name, &bytes)?;
+        drop(bytes);
         attachment.path = Some(path);
         msg.attachment = Some(attachment);
-        self.route(msg.clone(), bytes, None).await?;
+        self.send_attachment(msg).await
+    }
+
+    /// Announce `msg` (which carries an attachment stored at
+    /// `attachment.path`) to its targets and stream the bytes to each of
+    /// them in the background.
+    async fn send_attachment(self: &Arc<Self>, msg: Message) -> Result<Message, Error> {
+        let att = msg.attachment.as_ref().expect("attachment");
+        let path = att.path.clone().expect("attachment path");
+        let total = att.size;
+        let targets = self.route(&msg, None)?;
+        // The header is already on its way: stream the bytes whatever happens
+        // to the local history, or every peer would wait for chunks forever.
+        for t in targets {
+            let node = self.clone();
+            let id = msg.id.clone();
+            let path = path.clone();
+            tokio::spawn(async move { node.stream_to(id, path, total, t).await });
+        }
         self.store.lock().unwrap().append(msg.clone())?;
         Ok(msg)
+    }
+
+    /// Read the file in chunks and push them into one connection's data
+    /// queue, waiting whenever the queue is full.
+    async fn stream_to(&self, id: String, path: PathBuf, total: u64, target: Target) {
+        let result: Result<(), Error> = async {
+            let mut f = File::open(&path).await?;
+            let mut buf = vec![0u8; CHUNK_BYTES];
+            let mut sent = 0u64;
+            let mut last_progress = 0u64;
+            while sent < total {
+                let want = (total - sent).min(CHUNK_BYTES as u64) as usize;
+                let n = f.read(&mut buf[..want]).await?;
+                if n == 0 {
+                    return Err(Error::Other("file changed while sending".into()));
+                }
+                let pkt = Arc::new(Packet::chunk(&id, buf[..n].to_vec()));
+                target
+                    .data_tx
+                    .send(pkt)
+                    .await
+                    .map_err(|_| Error::Unreachable(target.id.clone()))?;
+                sent += n as u64;
+                if sent - last_progress >= PROGRESS_STEP && sent < total {
+                    last_progress = sent;
+                    self.emit(Event::Transfer {
+                        message_id: id.clone(),
+                        peer: target.id.clone(),
+                        direction: TransferDirection::Sending,
+                        done: sent,
+                        total,
+                    })
+                    .await;
+                }
+            }
+            target
+                .data_tx
+                .send(Arc::new(Packet::frame(Frame::End { id: id.clone() })))
+                .await
+                .map_err(|_| Error::Unreachable(target.id.clone()))?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => {
+                self.emit(Event::Transfer {
+                    message_id: id,
+                    peer: target.id,
+                    direction: TransferDirection::Sending,
+                    done: total,
+                    total,
+                })
+                .await;
+            }
+            Err(e) => {
+                tracing::warn!("sending attachment {id} to {} failed: {e}", target.id);
+                // Wait for room: the queue is usually full right after a read
+                // error, and a dropped Abort leaves the peer waiting forever.
+                // Returns at once when the connection is gone.
+                let _ = target
+                    .data_tx
+                    .send(Arc::new(Packet::frame(Frame::Abort { id: id.clone() })))
+                    .await;
+                self.emit(Event::TransferFailed {
+                    message_id: id,
+                    peer: target.id,
+                    direction: TransferDirection::Sending,
+                    reason: e.to_string(),
+                })
+                .await;
+            }
+        }
     }
 
     fn new_message(
@@ -354,60 +544,61 @@ impl Node {
         }
     }
 
-    /// Hand a message to the connections that should carry it. `exclude` is
-    /// the connection it arrived on, when forwarding.
-    async fn route(
-        &self,
-        message: Message,
-        payload: Vec<u8>,
-        exclude: Option<&PeerId>,
-    ) -> Result<(), Error> {
+    /// Hand a message header to the connections that should carry it and
+    /// return those that took it. `exclude` is the connection it arrived
+    /// on, when forwarding.
+    fn route(&self, message: &Message, exclude: Option<&PeerId>) -> Result<Vec<Target>, Error> {
         self.seen.lock().unwrap().insert(&message.id);
-        let pkt = Arc::new(Packet {
-            frame: Frame::Message {
-                message: message.for_wire(),
-            },
-            payload,
-        });
-        let targets: Vec<mpsc::Sender<Arc<Packet>>> = {
+        let pkt = Arc::new(Packet::frame(Frame::Message {
+            message: message.for_wire(),
+        }));
+        let candidates: Vec<Target> = {
             let inner = self.inner.lock().unwrap();
+            let target_of = |c: &Conn| Target {
+                id: c.info.id.clone(),
+                tx: c.tx.clone(),
+                data_tx: c.data_tx.clone(),
+            };
             match &message.to {
                 None => inner
                     .conns
                     .values()
                     .filter(|c| Some(&c.info.id) != exclude)
-                    .map(|c| c.tx.clone())
+                    .map(target_of)
                     .collect(),
                 Some(to) => {
                     if let Some(c) = inner.conns.get(to) {
-                        vec![c.tx.clone()]
+                        vec![target_of(c)]
                     } else {
                         // Not directly connected: hand it to the relays.
                         inner
                             .conns
                             .values()
                             .filter(|c| c.info.relay && Some(&c.info.id) != exclude)
-                            .map(|c| c.tx.clone())
+                            .map(target_of)
                             .collect()
                     }
                 }
             }
         };
-        if targets.is_empty() {
+        if candidates.is_empty() {
             if let Some(to) = &message.to {
                 if exclude.is_none() {
                     return Err(Error::Unreachable(to.clone()));
                 }
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
-        for tx in targets {
+        let mut accepted = Vec::with_capacity(candidates.len());
+        for t in candidates {
             // A slow peer must not stall the sender; drop if its outbox is full.
-            if tx.try_send(pkt.clone()).is_err() {
+            if t.tx.try_send(pkt.clone()).is_err() {
                 tracing::warn!("outbox full, dropping message for a slow peer");
+            } else {
+                accepted.push(t);
             }
         }
-        Ok(())
+        Ok(accepted)
     }
 
     // ----- connecting ----------------------------------------------------
@@ -584,6 +775,7 @@ impl Node {
 
         let serial = self.next_serial.fetch_add(1, Ordering::Relaxed);
         let (tx, mut rx) = mpsc::channel::<Arc<Packet>>(OUTBOX_CAPACITY);
+        let (data_tx, mut data_rx) = mpsc::channel::<Arc<Packet>>(DATA_CAPACITY);
         let cancel = CancellationToken::new();
         let info = PeerInfo {
             id: id.clone(),
@@ -620,6 +812,7 @@ impl Node {
                     info: info.clone(),
                     initiated_by_me,
                     tx: tx.clone(),
+                    data_tx,
                     cancel: cancel.clone(),
                 },
             );
@@ -636,18 +829,32 @@ impl Node {
 
         // Writer.
         let writer_cancel = cancel.clone();
+        // Control frames win whenever both queues have something, so a text
+        // message never waits behind more than the chunk being written.
         let writer = tokio::spawn(async move {
             loop {
-                tokio::select! {
+                let pkt = tokio::select! {
+                    biased;
                     _ = writer_cancel.cancelled() => break,
                     next = rx.recv() => match next {
-                        Some(pkt) => {
-                            if let Err(e) = write_packet(&mut wr, &pkt).await {
-                                tracing::debug!("write failed: {e}");
-                                break;
-                            }
-                        }
+                        Some(pkt) => pkt,
                         None => break,
+                    },
+                    next = data_rx.recv() => match next {
+                        Some(pkt) => pkt,
+                        None => break,
+                    },
+                };
+                match write_packet(&mut wr, &pkt).await {
+                    Ok(()) => {}
+                    // Refused before any byte went out: skip it, keep the
+                    // connection.
+                    Err(Error::FrameTooLarge(n)) => {
+                        tracing::warn!("dropping a frame of {n} bytes that exceeds the limit");
+                    }
+                    Err(e) => {
+                        tracing::debug!("write failed: {e}");
+                        break;
                     }
                 }
             }
@@ -655,6 +862,7 @@ impl Node {
         });
 
         // Reader.
+        let mut incoming: HashMap<String, Incoming> = HashMap::new();
         let result: Result<(), Error> = async {
             let mut ping = tokio::time::interval(PING_INTERVAL);
             ping.tick().await;
@@ -664,15 +872,21 @@ impl Node {
                     _ = self.shutdown.cancelled() => return Ok(()),
                     _ = ping.tick() => {
                         let _ = tx.try_send(Arc::new(Packet::frame(Frame::Ping)));
+                        self.expire_incoming(&id, &mut incoming).await;
                     }
                     pkt = timeout(READ_TIMEOUT, read_packet(&mut rd)) => {
                         let pkt = pkt.map_err(|_| Error::Protocol("peer went silent".into()))??;
-                        self.handle_packet(&id, &tx, pkt).await;
+                        self.handle_packet(&id, &tx, pkt, &mut incoming).await;
                     }
                 }
             }
         }
         .await;
+
+        // Whatever was still streaming in is lost; tell everyone downstream.
+        for (mid, inc) in incoming.drain() {
+            self.fail_incoming(&id, mid, inc, "connection closed").await;
+        }
 
         cancel.cancel();
         let _ = writer.await;
@@ -697,7 +911,13 @@ impl Node {
         result
     }
 
-    async fn handle_packet(&self, from: &PeerId, tx: &mpsc::Sender<Arc<Packet>>, pkt: Packet) {
+    async fn handle_packet(
+        &self,
+        from: &PeerId,
+        tx: &mpsc::Sender<Arc<Packet>>,
+        pkt: Packet,
+        incoming: &mut HashMap<String, Incoming>,
+    ) {
         match pkt.frame {
             Frame::Ping => {
                 let _ = tx.try_send(Arc::new(Packet::frame(Frame::Pong)));
@@ -712,12 +932,35 @@ impl Node {
                 self.recompute_via_relay().await;
             }
             Frame::Message { message } => {
-                self.handle_message(from, message, pkt.payload).await;
+                self.handle_message(from, message, incoming).await;
+            }
+            Frame::Chunk { id } => {
+                let pkt = Arc::new(Packet {
+                    frame: Frame::Chunk { id: id.clone() },
+                    payload: pkt.payload,
+                });
+                self.handle_chunk(from, id, pkt, incoming).await;
+            }
+            Frame::End { id } => {
+                if let Some(inc) = incoming.remove(&id) {
+                    self.finish_incoming(from, id, inc).await;
+                }
+            }
+            Frame::Abort { id } => {
+                if let Some(inc) = incoming.remove(&id) {
+                    self.fail_incoming(from, id, inc, "the sender gave up")
+                        .await;
+                }
             }
         }
     }
 
-    async fn handle_message(&self, from: &PeerId, mut message: Message, payload: Vec<u8>) {
+    async fn handle_message(
+        &self,
+        from: &PeerId,
+        mut message: Message,
+        incoming: &mut HashMap<String, Incoming>,
+    ) {
         if message.from == self.identity.id {
             return;
         }
@@ -728,29 +971,11 @@ impl Node {
             None => true,
             Some(to) => *to == self.identity.id,
         };
+        let forward_it = self.settings.relay && (message.to.is_none() || !for_me);
 
-        if for_me {
-            let mut deliver = true;
-            if let Some(att) = message.attachment.as_mut() {
-                if payload.len() as u64 != att.size || sha256_hex(&payload) != att.sha256 {
-                    tracing::warn!("attachment from {} failed verification", message.from_name);
-                    deliver = false;
-                } else {
-                    let saved = self.store.lock().unwrap().save_attachment(
-                        &message.id,
-                        &att.file_name,
-                        &payload,
-                    );
-                    match saved {
-                        Ok(p) => att.path = Some(p),
-                        Err(e) => {
-                            tracing::warn!("could not save attachment: {e}");
-                            deliver = false;
-                        }
-                    }
-                }
-            }
-            if deliver {
+        let Some(att) = message.attachment.as_mut() else {
+            // Plain text: deliver and/or forward right away.
+            if for_me {
                 if let Err(e) = self.store.lock().unwrap().append(message.clone()) {
                     tracing::warn!("could not persist message: {e}");
                 }
@@ -759,12 +984,214 @@ impl Node {
                 })
                 .await;
             }
-        }
-
-        if self.settings.relay && (message.to.is_none() || !for_me) {
-            if let Err(e) = self.route(message, payload, Some(from)).await {
-                tracing::debug!("relay could not forward: {e}");
+            if forward_it {
+                if let Err(e) = self.route(&message, Some(from)) {
+                    tracing::debug!("relay could not forward: {e}");
+                }
             }
+            return;
+        };
+
+        // An attachment: the bytes follow as chunks. Set up where they go.
+        att.path = None;
+        let total = att.size;
+        let file_name = att.file_name.clone();
+        if total > MAX_ATTACHMENT_BYTES {
+            tracing::warn!(
+                "ignoring attachment from {} larger than the limit",
+                message.from_name
+            );
+            return;
+        }
+        if incoming.len() >= MAX_INCOMING_PER_CONN {
+            tracing::warn!("too many transfers in flight from {}", message.from_name);
+            return;
+        }
+        let file = if for_me {
+            let partial = self
+                .store
+                .lock()
+                .unwrap()
+                .partial_path(&message.id, &file_name);
+            match File::create(&partial).await {
+                Ok(f) => Some((f, partial)),
+                Err(e) => {
+                    tracing::warn!("could not create attachment file: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let forward = if forward_it {
+            self.route(&message, Some(from)).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        if file.is_none() && forward.is_empty() {
+            return;
+        }
+        incoming.insert(
+            message.id.clone(),
+            Incoming {
+                message,
+                total,
+                received: 0,
+                hasher: Sha256::new(),
+                file,
+                forward,
+                last_progress: 0,
+                last_activity: Instant::now(),
+            },
+        );
+    }
+
+    /// Drop transfers whose sender stopped sending without an `End` or
+    /// `Abort` (lost frame, stalled peer), freeing their slot and file.
+    async fn expire_incoming(&self, from: &PeerId, incoming: &mut HashMap<String, Incoming>) {
+        let stale: Vec<String> = incoming
+            .iter()
+            .filter(|(_, inc)| inc.last_activity.elapsed() > INCOMING_IDLE_TIMEOUT)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some(inc) = incoming.remove(&id) {
+                self.fail_incoming(from, id, inc, "transfer stalled").await;
+            }
+        }
+    }
+
+    async fn handle_chunk(
+        &self,
+        from: &PeerId,
+        id: String,
+        pkt: Arc<Packet>,
+        incoming: &mut HashMap<String, Incoming>,
+    ) {
+        let Some(inc) = incoming.get_mut(&id) else {
+            return; // Unknown or already failed: skip the bytes.
+        };
+        let n = pkt.payload.len() as u64;
+        if inc.received + n > inc.total {
+            let inc = incoming.remove(&id).unwrap();
+            self.fail_incoming(from, id, inc, "more bytes than announced")
+                .await;
+            return;
+        }
+        if let Some((f, _)) = inc.file.as_mut() {
+            if let Err(e) = f.write_all(&pkt.payload).await {
+                let inc = incoming.remove(&id).unwrap();
+                self.fail_incoming(from, id, inc, &format!("could not write file: {e}"))
+                    .await;
+                return;
+            }
+        }
+        inc.hasher.update(&pkt.payload);
+        inc.received += n;
+        inc.last_activity = Instant::now();
+        forward_packet(&mut inc.forward, &pkt).await;
+        if inc.file.is_some() && inc.received - inc.last_progress >= PROGRESS_STEP {
+            inc.last_progress = inc.received;
+            self.emit(Event::Transfer {
+                message_id: id,
+                peer: from.clone(),
+                direction: TransferDirection::Receiving,
+                done: inc.received,
+                total: inc.total,
+            })
+            .await;
+        }
+    }
+
+    /// Every chunk arrived: verify, move the file into place, deliver.
+    async fn finish_incoming(&self, from: &PeerId, id: String, mut inc: Incoming) {
+        forward_packet(
+            &mut inc.forward,
+            &Arc::new(Packet::frame(Frame::End { id: id.clone() })),
+        )
+        .await;
+        let Some((mut f, partial)) = inc.file.take() else {
+            return; // Relay only: nothing to keep.
+        };
+        let att = inc.message.attachment.as_mut().expect("attachment");
+        let digest = hex::encode(std::mem::take(&mut inc.hasher).finalize());
+        let verified: Result<(), String> = async {
+            if inc.received != inc.total {
+                return Err(format!("received {} of {} bytes", inc.received, inc.total));
+            }
+            if digest != att.sha256 {
+                return Err("checksum mismatch".into());
+            }
+            f.flush().await.map_err(|e| e.to_string())?;
+            drop(f);
+            let final_path = self
+                .store
+                .lock()
+                .unwrap()
+                .attachment_path(&inc.message.id, &att.file_name);
+            tokio::fs::rename(&partial, &final_path)
+                .await
+                .map_err(|e| e.to_string())?;
+            att.path = Some(final_path);
+            Ok(())
+        }
+        .await;
+        if let Err(reason) = verified {
+            tracing::warn!(
+                "attachment from {} failed verification: {reason}",
+                inc.message.from_name
+            );
+            let _ = tokio::fs::remove_file(&partial).await;
+            self.emit(Event::TransferFailed {
+                message_id: id,
+                peer: from.clone(),
+                direction: TransferDirection::Receiving,
+                reason,
+            })
+            .await;
+            return;
+        }
+        if let Err(e) = self.store.lock().unwrap().append(inc.message.clone()) {
+            tracing::warn!("could not persist message: {e}");
+        }
+        self.emit(Event::Transfer {
+            message_id: id,
+            peer: from.clone(),
+            direction: TransferDirection::Receiving,
+            done: inc.total,
+            total: inc.total,
+        })
+        .await;
+        self.emit(Event::Message {
+            message: inc.message,
+        })
+        .await;
+    }
+
+    /// Drop a half-received attachment: delete the partial file and tell
+    /// downstream peers to do the same.
+    async fn fail_incoming(&self, from: &PeerId, id: String, mut inc: Incoming, reason: &str) {
+        // Abort goes on the control queue: it overtakes chunks still queued
+        // for the target (which then ignores them) and never waits on a
+        // full data queue, so a dead upstream is torn down without delay.
+        let abort = Arc::new(Packet::frame(Frame::Abort { id: id.clone() }));
+        for t in inc.forward.drain(..) {
+            let _ = t.tx.try_send(abort.clone());
+        }
+        if let Some((f, partial)) = inc.file.take() {
+            drop(f);
+            let _ = tokio::fs::remove_file(&partial).await;
+            tracing::warn!(
+                "attachment from {} not received: {reason}",
+                inc.message.from_name
+            );
+            self.emit(Event::TransferFailed {
+                message_id: id,
+                peer: from.clone(),
+                direction: TransferDirection::Receiving,
+                reason: reason.to_string(),
+            })
+            .await;
         }
     }
 
@@ -833,6 +1260,35 @@ impl Drop for Node {
     fn drop(&mut self) {
         self.shutdown.cancel();
     }
+}
+
+/// Push one packet into every target's data queue, waiting up to
+/// [`FORWARD_TIMEOUT`] for each. A target that is gone or too slow is
+/// dropped from the list and told to discard the transfer.
+async fn forward_packet(targets: &mut Vec<Target>, pkt: &Arc<Packet>) {
+    let mut i = 0;
+    while i < targets.len() {
+        match timeout(FORWARD_TIMEOUT, targets[i].data_tx.send(pkt.clone())).await {
+            Ok(Ok(())) => i += 1,
+            _ => {
+                let t = targets.swap_remove(i);
+                tracing::debug!("stopped forwarding a transfer to {}", t.id);
+                // Whatever frame was lost (a chunk, the End, or an Abort),
+                // the target must discard the transfer; a repeat Abort is
+                // harmless.
+                if let Frame::Chunk { id } | Frame::End { id } | Frame::Abort { id } = &pkt.frame {
+                    let _ =
+                        t.tx.try_send(Arc::new(Packet::frame(Frame::Abort { id: id.clone() })));
+                }
+            }
+        }
+    }
+}
+
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".into())
 }
 
 /// `host` -> `host:DEFAULT_PORT`; `host:port` unchanged; IPv6 needs brackets.

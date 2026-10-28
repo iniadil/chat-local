@@ -7,16 +7,22 @@ use std::path::PathBuf;
 pub type PeerId = String;
 
 /// Bumped whenever the wire format changes incompatibly.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 /// mDNS / DNS-SD service type announced on the LAN.
 pub const SERVICE_TYPE: &str = "_chatlocal._tcp.local.";
 /// Default TCP port a node listens on.
 pub const DEFAULT_PORT: u16 = 47800;
-/// Hard cap for a single frame (JSON header + attachment bytes).
-pub const MAX_FRAME_BYTES: usize = 1024 * 1024 * 1024;
-/// Practical cap for a single attachment. Everything is held in memory while
-/// it is transferred, so keep this well below what a laptop can spare.
-pub const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+/// Size of one attachment chunk on the wire. Attachments are streamed, so
+/// this is also roughly how much of a transfer sits in memory at a time.
+pub const CHUNK_BYTES: usize = 256 * 1024;
+/// Hard cap for a single frame (JSON header + one chunk).
+pub const MAX_FRAME_BYTES: usize = CHUNK_BYTES + 64 * 1024;
+/// Longest text one message may carry. Keeps a text frame well inside
+/// [`MAX_FRAME_BYTES`] so it can never be refused at the wire.
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
+/// Cap for a single attachment. Bytes stream from disk to disk, so this only
+/// guards against mistakes, not memory.
+pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Identity {
@@ -135,9 +141,44 @@ pub struct PeerInfo {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Ready { port: u16, addresses: Vec<String> },
-    PeerOnline { peer: PeerInfo },
-    PeerOffline { id: PeerId },
-    Message { message: Message },
-    Error { message: String },
+    Ready {
+        port: u16,
+        addresses: Vec<String>,
+    },
+    PeerOnline {
+        peer: PeerInfo,
+    },
+    PeerOffline {
+        id: PeerId,
+    },
+    Message {
+        message: Message,
+    },
+    /// Progress of an attachment transfer, emitted every megabyte or so and
+    /// once more when it finishes. `done == total` means complete.
+    Transfer {
+        message_id: String,
+        /// The peer the bytes are going to or coming from.
+        peer: PeerId,
+        direction: TransferDirection,
+        done: u64,
+        total: u64,
+    },
+    /// An attachment transfer that will not complete.
+    TransferFailed {
+        message_id: String,
+        peer: PeerId,
+        direction: TransferDirection,
+        reason: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransferDirection {
+    Sending,
+    Receiving,
 }

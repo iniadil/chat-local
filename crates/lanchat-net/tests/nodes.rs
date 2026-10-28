@@ -233,3 +233,136 @@ async fn simultaneous_dial_keeps_one_connection() {
     assert_eq!(a.peers().len(), 1);
     assert_eq!(b.peers().len(), 1);
 }
+
+/// A file far larger than one chunk crosses a relay intact, the relay keeps
+/// nothing on disk for a direct message, and text sent during the transfer
+/// is not held behind it.
+#[tokio::test]
+async fn large_file_streams_through_relay_without_blocking_text() {
+    let (hub, mut hub_rx, dh) = spawn("Hub", true, vec![]).await;
+    let addr = format!("127.0.0.1:{}", hub.port());
+    let (a, mut a_rx, _da) = spawn("Alice", false, vec![addr.clone()]).await;
+    let (c, mut c_rx, _dc) = spawn("Cici", false, vec![addr]).await;
+    wait_for(
+        &mut hub_rx,
+        "Cici at hub",
+        |e| matches!(e, Event::PeerOnline { peer } if peer.name == "Cici"),
+    )
+    .await;
+    wait_for(
+        &mut a_rx,
+        "Cici via hub at Alice",
+        |e| matches!(e, Event::PeerOnline { peer } if peer.name == "Cici"),
+    )
+    .await;
+    wait_for(
+        &mut c_rx,
+        "Alice via hub at Cici",
+        |e| matches!(e, Event::PeerOnline { peer } if peer.name == "Alice"),
+    )
+    .await;
+
+    // 6 MB: many chunks, several progress events.
+    let src = _da.path().join("big.bin");
+    let payload: Vec<u8> = (0..6 * 1024 * 1024u32).map(|i| (i % 253) as u8).collect();
+    std::fs::write(&src, &payload).unwrap();
+    let sent = a
+        .send_file(Some(c.identity.id.clone()), &src)
+        .await
+        .unwrap();
+    // Text right behind the file must arrive before the file is complete.
+    a.send_text(Some(c.identity.id.clone()), "masih hidup?".into())
+        .await
+        .unwrap();
+
+    let mut text_seen = false;
+    let mut progress_seen = false;
+    let file_msg = loop {
+        let ev = timeout(Duration::from_secs(20), c_rx.recv())
+            .await
+            .expect("timed out at Cici")
+            .expect("closed");
+        match ev {
+            Event::Message { message } if message.text.is_some() => {
+                text_seen = true;
+            }
+            Event::Transfer { done, total, .. } => {
+                assert!(done <= total);
+                if done < total {
+                    progress_seen = true;
+                }
+            }
+            Event::Message { message } => {
+                assert!(text_seen, "text was stuck behind the file transfer");
+                break message;
+            }
+            Event::TransferFailed { reason, .. } => panic!("transfer failed: {reason}"),
+            _ => {}
+        }
+    };
+    assert!(progress_seen);
+    assert_eq!(file_msg.id, sent.id);
+    let att = file_msg.attachment.unwrap();
+    assert_eq!(att.size, payload.len() as u64);
+    assert_eq!(std::fs::read(att.path.unwrap()).unwrap(), payload);
+
+    // Sender saw completion too.
+    wait_for(&mut a_rx, "send complete at Alice", |e| {
+        matches!(e, Event::Transfer { done, total, direction: TransferDirection::Sending, .. } if done == total)
+    })
+    .await;
+
+    // The hub forwarded without keeping anything.
+    let hub_files: Vec<_> = std::fs::read_dir(dh.path().join("files"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(hub_files.is_empty(), "hub kept {:?}", hub_files);
+    assert!(hub.messages().is_empty());
+}
+
+/// If the sender goes away mid-transfer, the receiver drops the partial file
+/// and reports the failure instead of delivering a broken message.
+#[tokio::test]
+async fn interrupted_transfer_leaves_no_partial_file() {
+    let (a, mut a_rx, da) = spawn("Alice", false, vec![]).await;
+    let (b, mut b_rx, _db) = spawn("Bob", false, vec![format!("127.0.0.1:{}", a.port())]).await;
+    wait_for(&mut a_rx, "Bob at Alice", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+    wait_for(&mut b_rx, "Alice at Bob", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+
+    let src = _db.path().join("huge.bin");
+    std::fs::write(&src, vec![7u8; 32 * 1024 * 1024]).unwrap();
+    b.send_file(Some(a.identity.id.clone()), &src)
+        .await
+        .unwrap();
+    // Let a few chunks land, then kill the sender.
+    wait_for(&mut a_rx, "first progress at Alice", |e| {
+        matches!(
+            e,
+            Event::Transfer {
+                direction: TransferDirection::Receiving,
+                ..
+            }
+        )
+    })
+    .await;
+    b.shutdown();
+
+    let ev = wait_for(&mut a_rx, "failure at Alice", |e| {
+        matches!(e, Event::TransferFailed { .. } | Event::Message { .. })
+    })
+    .await;
+    assert!(matches!(ev, Event::TransferFailed { .. }), "got {ev:?}");
+    let leftovers: Vec<_> = std::fs::read_dir(da.path().join("files"))
+        .unwrap()
+        .flatten()
+        .collect();
+    assert!(leftovers.is_empty(), "left {:?}", leftovers);
+    assert!(a.messages().is_empty());
+}

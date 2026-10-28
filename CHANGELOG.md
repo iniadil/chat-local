@@ -4,6 +4,22 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Attachments are streamed in 256 KB chunks from disk to disk instead of
+  being held in memory. Memory use no longer depends on file size, the
+  attachment cap rises from 512 MB to 4 GB, and the minimum RAM in the
+  system requirements drops from 4 GB to 2 GB.
+- Text messages and pings are written ahead of queued file chunks, so chat
+  stays responsive while a large file is in transit. A relay forwards chunks
+  without storing files that are not addressed to it.
+- A transfer that is interrupted leaves no partial file; the receiver is told
+  it failed. The UI shows progress of files being sent or received.
+- **Protocol version 2.** Peers running 0.1.x cannot exchange messages with
+  this version; update every computer.
+
 ## [0.1.1] - 2026-10-28
 
 ### Fixed
