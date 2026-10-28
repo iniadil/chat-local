@@ -1,4 +1,5 @@
 :root {
+  --foot-h: 78px; /* shared height of sidebar footer and composer so their top borders align */
   --paper: #f5f2eb;
   --paper-2: #ece8de;
   --card: #ffffff;
@@ -112,8 +113,9 @@ code { font-family: var(--mono); font-size: 12px; }
 .empty-peers { padding: 14px 10px; color: var(--ink-2); font-size: 13px; line-height: 1.5; }
 
 .sidebar-foot {
-  border-top: 1px solid var(--line); padding: 10px 14px;
-  display: flex; flex-direction: column; gap: 6px;
+  border-top: 1px solid var(--line); padding: 10px 14px 14px;
+  display: flex; flex-direction: column; justify-content: flex-end; gap: 6px;
+  min-height: var(--foot-h);
 }
 .addr { font-family: var(--mono); font-size: 12px; color: var(--ink-2); word-break: break-all; }
 .addr b { color: var(--ink); font-weight: 600; }
@@ -179,7 +181,11 @@ code { font-family: var(--mono); font-size: 12px; }
 .empty-chat h3 { color: var(--ink); margin: 0 0 6px; font-size: 16px; }
 
 /* ---------- composer ---------- */
-.composer { padding: 10px 16px 14px; border-top: 1px solid var(--line); background: var(--paper); }
+.composer {
+  padding: 10px 16px 14px; border-top: 1px solid var(--line); background: var(--paper);
+  display: flex; flex-direction: column; justify-content: flex-end;
+  min-height: var(--foot-h);
+}
 .transfers { display: flex; flex-direction: column; gap: 6px; padding: 0 4px 8px; }
 .transfer { font-size: 12px; color: var(--muted, inherit); }
 .transfer .bar { height: 4px; border-radius: 2px; margin-top: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); overflow: hidden; }
