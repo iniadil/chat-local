@@ -4,7 +4,7 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-28
 
 ### Changed
 
@@ -56,5 +56,6 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.2.0]: https://github.com/iniadil/chat-local/releases/tag/v0.2.0
 [0.1.1]: https://github.com/iniadil/chat-local/releases/tag/v0.1.1
 [0.1.0]: https://github.com/iniadil/chat-local/releases/tag/v0.1.0
