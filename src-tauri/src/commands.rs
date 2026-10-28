@@ -144,13 +144,21 @@ pub async fn file_info(path: String) -> Result<FileInfo, String> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.clone());
     let preview = if mime.starts_with("image/") && meta.len() <= PREVIEW_MAX_BYTES {
-        let bytes = tokio::fs::read(&p).await.map_err(|e| format!("{path}: {e}"))?;
+        let bytes = tokio::fs::read(&p)
+            .await
+            .map_err(|e| format!("{path}: {e}"))?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
         Some(format!("data:{mime};base64,{b64}"))
     } else {
         None
     };
-    Ok(FileInfo { path, file_name, size: meta.len(), mime, preview })
+    Ok(FileInfo {
+        path,
+        file_name,
+        size: meta.len(),
+        mime,
+        preview,
+    })
 }
 
 #[derive(Deserialize)]
