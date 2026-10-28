@@ -17,6 +17,9 @@ pub const DEFAULT_PORT: u16 = 47800;
 pub const CHUNK_BYTES: usize = 256 * 1024;
 /// Hard cap for a single frame (JSON header + one chunk).
 pub const MAX_FRAME_BYTES: usize = CHUNK_BYTES + 64 * 1024;
+/// Longest text one message may carry. Keeps a text frame well inside
+/// [`MAX_FRAME_BYTES`] so it can never be refused at the wire.
+pub const MAX_TEXT_BYTES: usize = 64 * 1024;
 /// Cap for a single attachment. Bytes stream from disk to disk, so this only
 /// guards against mistakes, not memory.
 pub const MAX_ATTACHMENT_BYTES: u64 = 4 * 1024 * 1024 * 1024;

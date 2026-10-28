@@ -12,7 +12,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::net::{TcpListener, TcpStream};
@@ -36,6 +36,9 @@ const DATA_CAPACITY: usize = 8;
 const FORWARD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Transfers one connection may have in flight toward us at once.
 const MAX_INCOMING_PER_CONN: usize = 16;
+/// An incoming transfer that has not seen a chunk for this long is dropped,
+/// so a lost `End`/`Abort` cannot pin a `.part` file and a slot forever.
+const INCOMING_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 /// Emit a progress event every this many bytes.
 const PROGRESS_STEP: u64 = 1024 * 1024;
 
@@ -78,6 +81,8 @@ struct Incoming {
     /// Connections this relay forwards the chunks to.
     forward: Vec<Target>,
     last_progress: u64,
+    /// When the announcement or the latest chunk arrived.
+    last_activity: Instant,
 }
 
 #[derive(Default)]
@@ -301,6 +306,12 @@ impl Node {
         if text.is_empty() {
             return Err(Error::Other("empty message".into()));
         }
+        if text.len() > MAX_TEXT_BYTES {
+            return Err(Error::Other(format!(
+                "message is longer than {} KB",
+                MAX_TEXT_BYTES / 1024
+            )));
+        }
         let msg = self.new_message(to, Some(text), None);
         self.route(&msg, None)?;
         self.store.lock().unwrap().append(msg.clone())?;
@@ -369,17 +380,25 @@ impl Node {
             .lock()
             .unwrap()
             .attachment_path(&msg.id, &file_name);
-        let (size, sha256) = copy_hashed(path, &dest).await?;
-        msg.attachment = Some(Attachment {
-            kind: AttachmentKind::from_mime(&mime),
-            file_name,
-            mime,
-            size,
-            sha256,
-            duration_ms: None,
-            path: Some(dest),
-        });
-        self.send_attachment(msg).await
+        let sent = async {
+            let (size, sha256) = copy_hashed(path, &dest).await?;
+            msg.attachment = Some(Attachment {
+                kind: AttachmentKind::from_mime(&mime),
+                file_name,
+                mime,
+                size,
+                sha256,
+                duration_ms: None,
+                path: Some(dest.clone()),
+            });
+            self.send_attachment(msg).await
+        }
+        .await;
+        if sent.is_err() {
+            // Nothing refers to the copy: do not leave it in the data folder.
+            let _ = tokio::fs::remove_file(&dest).await;
+        }
+        sent
     }
 
     /// Send bytes produced in memory (a voice note, a pasted image). A copy is
@@ -424,13 +443,15 @@ impl Node {
         let path = att.path.clone().expect("attachment path");
         let total = att.size;
         let targets = self.route(&msg, None)?;
-        self.store.lock().unwrap().append(msg.clone())?;
+        // The header is already on its way: stream the bytes whatever happens
+        // to the local history, or every peer would wait for chunks forever.
         for t in targets {
             let node = self.clone();
             let id = msg.id.clone();
             let path = path.clone();
             tokio::spawn(async move { node.stream_to(id, path, total, t).await });
         }
+        self.store.lock().unwrap().append(msg.clone())?;
         Ok(msg)
     }
 
@@ -488,9 +509,13 @@ impl Node {
             }
             Err(e) => {
                 tracing::warn!("sending attachment {id} to {} failed: {e}", target.id);
+                // Wait for room: the queue is usually full right after a read
+                // error, and a dropped Abort leaves the peer waiting forever.
+                // Returns at once when the connection is gone.
                 let _ = target
                     .data_tx
-                    .try_send(Arc::new(Packet::frame(Frame::Abort { id: id.clone() })));
+                    .send(Arc::new(Packet::frame(Frame::Abort { id: id.clone() })))
+                    .await;
                 self.emit(Event::TransferFailed {
                     message_id: id,
                     peer: target.id,
@@ -820,9 +845,17 @@ impl Node {
                         None => break,
                     },
                 };
-                if let Err(e) = write_packet(&mut wr, &pkt).await {
-                    tracing::debug!("write failed: {e}");
-                    break;
+                match write_packet(&mut wr, &pkt).await {
+                    Ok(()) => {}
+                    // Refused before any byte went out: skip it, keep the
+                    // connection.
+                    Err(Error::FrameTooLarge(n)) => {
+                        tracing::warn!("dropping a frame of {n} bytes that exceeds the limit");
+                    }
+                    Err(e) => {
+                        tracing::debug!("write failed: {e}");
+                        break;
+                    }
                 }
             }
             let _ = wr.shutdown().await;
@@ -839,6 +872,7 @@ impl Node {
                     _ = self.shutdown.cancelled() => return Ok(()),
                     _ = ping.tick() => {
                         let _ = tx.try_send(Arc::new(Packet::frame(Frame::Ping)));
+                        self.expire_incoming(&id, &mut incoming).await;
                     }
                     pkt = timeout(READ_TIMEOUT, read_packet(&mut rd)) => {
                         let pkt = pkt.map_err(|_| Error::Protocol("peer went silent".into()))??;
@@ -1007,8 +1041,24 @@ impl Node {
                 file,
                 forward,
                 last_progress: 0,
+                last_activity: Instant::now(),
             },
         );
+    }
+
+    /// Drop transfers whose sender stopped sending without an `End` or
+    /// `Abort` (lost frame, stalled peer), freeing their slot and file.
+    async fn expire_incoming(&self, from: &PeerId, incoming: &mut HashMap<String, Incoming>) {
+        let stale: Vec<String> = incoming
+            .iter()
+            .filter(|(_, inc)| inc.last_activity.elapsed() > INCOMING_IDLE_TIMEOUT)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            if let Some(inc) = incoming.remove(&id) {
+                self.fail_incoming(from, id, inc, "transfer stalled").await;
+            }
+        }
     }
 
     async fn handle_chunk(
@@ -1038,6 +1088,7 @@ impl Node {
         }
         inc.hasher.update(&pkt.payload);
         inc.received += n;
+        inc.last_activity = Instant::now();
         forward_packet(&mut inc.forward, &pkt).await;
         if inc.file.is_some() && inc.received - inc.last_progress >= PROGRESS_STEP {
             inc.last_progress = inc.received;
@@ -1120,11 +1171,13 @@ impl Node {
     /// Drop a half-received attachment: delete the partial file and tell
     /// downstream peers to do the same.
     async fn fail_incoming(&self, from: &PeerId, id: String, mut inc: Incoming, reason: &str) {
-        forward_packet(
-            &mut inc.forward,
-            &Arc::new(Packet::frame(Frame::Abort { id: id.clone() })),
-        )
-        .await;
+        // Abort goes on the control queue: it overtakes chunks still queued
+        // for the target (which then ignores them) and never waits on a
+        // full data queue, so a dead upstream is torn down without delay.
+        let abort = Arc::new(Packet::frame(Frame::Abort { id: id.clone() }));
+        for t in inc.forward.drain(..) {
+            let _ = t.tx.try_send(abort.clone());
+        }
         if let Some((f, partial)) = inc.file.take() {
             drop(f);
             let _ = tokio::fs::remove_file(&partial).await;
@@ -1220,7 +1273,10 @@ async fn forward_packet(targets: &mut Vec<Target>, pkt: &Arc<Packet>) {
             _ => {
                 let t = targets.swap_remove(i);
                 tracing::debug!("stopped forwarding a transfer to {}", t.id);
-                if let Frame::Chunk { id } = &pkt.frame {
+                // Whatever frame was lost (a chunk, the End, or an Abort),
+                // the target must discard the transfer; a repeat Abort is
+                // harmless.
+                if let Frame::Chunk { id } | Frame::End { id } | Frame::Abort { id } = &pkt.frame {
                     let _ =
                         t.tx.try_send(Arc::new(Packet::frame(Frame::Abort { id: id.clone() })));
                 }

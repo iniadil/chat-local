@@ -126,10 +126,24 @@ impl Store {
 /// Copy `src` into `dest`, returning `(size, sha256)`. Reads in chunks, so
 /// memory use does not depend on the file size.
 pub async fn copy_hashed(src: &Path, dest: &Path) -> Result<(u64, String), Error> {
+    let mut to = tokio::fs::File::create(dest).await?;
+    read_hashed(src, Some(&mut to)).await
+}
+
+/// SHA-256 of a file on disk, read in chunks.
+pub async fn hash_file(path: &Path) -> Result<(u64, String), Error> {
+    read_hashed(path, None).await
+}
+
+/// Read `src` in [`CHUNK_BYTES`](crate::types::CHUNK_BYTES) pieces, hashing
+/// every byte and copying it into `dest` when one is given.
+async fn read_hashed(
+    src: &Path,
+    mut dest: Option<&mut tokio::fs::File>,
+) -> Result<(u64, String), Error> {
     use sha2::{Digest, Sha256};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut from = tokio::fs::File::open(src).await?;
-    let mut to = tokio::fs::File::create(dest).await?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; crate::types::CHUNK_BYTES];
     let mut size = 0u64;
@@ -139,28 +153,13 @@ pub async fn copy_hashed(src: &Path, dest: &Path) -> Result<(u64, String), Error
             break;
         }
         hasher.update(&buf[..n]);
-        to.write_all(&buf[..n]).await?;
+        if let Some(to) = dest.as_mut() {
+            to.write_all(&buf[..n]).await?;
+        }
         size += n as u64;
     }
-    to.flush().await?;
-    Ok((size, hex::encode(hasher.finalize())))
-}
-
-/// SHA-256 of a file on disk, read in chunks.
-pub async fn hash_file(path: &Path) -> Result<(u64, String), Error> {
-    use sha2::{Digest, Sha256};
-    use tokio::io::AsyncReadExt;
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; crate::types::CHUNK_BYTES];
-    let mut size = 0u64;
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-        size += n as u64;
+    if let Some(to) = dest {
+        to.flush().await?;
     }
     Ok((size, hex::encode(hasher.finalize())))
 }

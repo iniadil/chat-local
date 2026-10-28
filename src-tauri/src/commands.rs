@@ -95,22 +95,11 @@ pub async fn send_files(
     let mut sent = Vec::new();
     for p in paths {
         let path = PathBuf::from(&p);
-        let meta = tokio::fs::metadata(&path)
-            .await
-            .map_err(|e| format!("{p}: {e}"))?;
-        if !meta.is_file() {
-            return Err(format!("{p}: not a file"));
-        }
-        if meta.len() > lanchat_net::MAX_ATTACHMENT_BYTES {
-            return Err(format!(
-                "{p}: larger than {} MB",
-                lanchat_net::MAX_ATTACHMENT_BYTES / (1024 * 1024)
-            ));
-        }
+        // `import_file` checks that it is a regular file under the size cap.
         let msg = node
             .import_file(to.clone(), &path, Some(mime_for(&path)))
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{p}: {e}"))?;
         sent.push(msg);
     }
     Ok(sent)
