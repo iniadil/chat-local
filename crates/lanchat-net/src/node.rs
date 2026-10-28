@@ -124,7 +124,12 @@ impl Seen {
 
 pub struct Node {
     pub identity: Identity,
+    /// Settings the node was started with. `manual_peers` here is only the
+    /// initial list; see [`Node::set_manual_peers`].
     pub settings: Settings,
+    /// Addresses the reconnect loop keeps dialing. Changeable at runtime so
+    /// remembering a peer does not need a restart.
+    manual_peers: Mutex<Vec<String>>,
     port: u16,
     store: Mutex<Store>,
     inner: Mutex<Inner>,
@@ -165,6 +170,7 @@ impl Node {
                 },
             },
             settings: config.settings.clone(),
+            manual_peers: Mutex::new(config.settings.manual_peers.clone()),
             port,
             store: Mutex::new(store),
             inner: Mutex::new(Inner::default()),
@@ -697,6 +703,15 @@ impl Node {
         out
     }
 
+    /// Replace the addresses the reconnect loop dials and dial any new ones
+    /// right away. Existing connections are kept, including ones to
+    /// addresses no longer in the list.
+    pub fn set_manual_peers(self: &Arc<Self>, peers: Vec<String>) {
+        *self.manual_peers.lock().unwrap() = peers;
+        let node = self.clone();
+        tokio::spawn(async move { node.connect_pending().await });
+    }
+
     /// Try every address we should be connected to but are not.
     async fn connect_pending(self: &Arc<Self>) {
         let mut targets: Vec<(Option<PeerId>, String)> = Vec::new();
@@ -715,7 +730,7 @@ impl Node {
                     targets.push((Some(id.clone()), a.to_string()));
                 }
             }
-            for m in &self.settings.manual_peers {
+            for m in self.manual_peers.lock().unwrap().iter() {
                 if !m.trim().is_empty() {
                     targets.push((None, normalize_target(m)));
                 }
