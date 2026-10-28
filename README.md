@@ -56,24 +56,44 @@ contains:
 | `ChatLocal_x.y.z_aarch64.dmg` | macOS 11+, Apple Silicon (M1 and later) |
 | `ChatLocal_x.y.z_x64.dmg` | macOS 11+, Intel |
 
-The builds are not code‑signed (signing certificates cost money), so both
-operating systems warn you the first time:
+The builds are not signed with a paid developer certificate, so both
+operating systems warn you the first time. **The download is not broken and
+the app is not malware**; the warning only means the publisher is not
+registered with Microsoft or Apple. You can check what you downloaded
+against the source in this repository.
 
-- **Windows** shows a SmartScreen dialog. Click *More info* → *Run anyway*.
-  On first launch Windows Firewall asks to allow ChatLocal: tick **Private
-  networks** and allow it, otherwise other computers cannot reach you.
-- **macOS** says the app "cannot be opened because the developer cannot be
-  verified" or, on some versions, that it "is damaged and can't be opened".
-  Neither means the download is broken. After copying the app to
-  Applications, run this once in Terminal, then open it normally:
+### Windows
 
-  ```sh
-  xattr -dr com.apple.quarantine /Applications/ChatLocal.app
-  ```
+SmartScreen shows "Windows protected your PC". Click *More info* → *Run
+anyway*. On first launch Windows Firewall asks to allow ChatLocal: tick
+**Private networks** and allow it, otherwise other computers cannot reach you.
 
-  On macOS 15 and newer you can instead open *System Settings → Privacy &
-  Security* and click *Open Anyway* after the first failed launch. macOS also asks for microphone access the first time you record a voice note
-  and for local‑network access the first time the app searches for peers.
+### macOS
+
+On macOS 15 Sequoia and newer, the first launch stops with this dialog:
+
+<img src="docs/macos-gatekeeper.png" width="320" alt="macOS dialog: ChatLocal Not Opened. Apple could not verify ChatLocal is free of malware.">
+
+This is macOS's standard wording for any app that was not notarized by
+Apple. Do **not** click *Move to Trash*. Instead:
+
+1. Click **Done**.
+2. Open **System Settings → Privacy & Security** and scroll down to the
+   *Security* section.
+3. Next to "ChatLocal was blocked to protect your Mac", click **Open Anyway**
+   and confirm with your password or Touch ID.
+4. Open ChatLocal again. The question is asked only once.
+
+Older macOS versions say the developer "cannot be verified"; there you can
+right‑click the app and choose *Open*. On any version you can instead clear
+the quarantine flag once in Terminal, after copying the app to Applications:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/ChatLocal.app
+```
+
+macOS also asks for microphone access the first time you record a voice note
+and for local‑network access the first time the app searches for peers.
 
 Windows needs the WebView2 runtime; it is preinstalled on Windows 10 (recent
 builds) and 11, and the installer fetches it if missing.
