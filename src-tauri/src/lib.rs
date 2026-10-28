@@ -35,6 +35,7 @@ pub fn run() {
             commands::save_settings,
             commands::send_text,
             commands::send_files,
+            commands::file_info,
             commands::send_blob,
             commands::connect_peer,
             commands::open_attachment,

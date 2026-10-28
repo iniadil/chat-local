@@ -23,6 +23,15 @@ export interface Message {
   attachment?: Attachment;
 }
 
+export interface FileInfo {
+  path: string;
+  file_name: string;
+  size: number;
+  mime: string;
+  /** data: URL for images small enough to preview; null otherwise. */
+  preview: string | null;
+}
+
 export interface Peer {
   id: string;
   name: string;
@@ -67,6 +76,7 @@ export const api = {
   saveSettings: (settings: Settings) => invoke<Snapshot>("save_settings", { settings }),
   sendText: (to: string | null, text: string) => invoke<Message>("send_text", { to, text }),
   sendFiles: (to: string | null, paths: string[]) => invoke<Message[]>("send_files", { to, paths }),
+  fileInfo: (path: string) => invoke<FileInfo>("file_info", { path }),
   sendBlob: (to: string | null, blob: { file_name: string; mime: string; data: string; duration_ms?: number }) =>
     invoke<Message>("send_blob", { to, blob }),
   connectPeer: (target: string) => invoke<void>("connect_peer", { target }),

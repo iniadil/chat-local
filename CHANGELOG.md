@@ -4,6 +4,14 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- Dropped, picked and pasted files no longer send immediately. They wait as
+  previews above the message box (thumbnail for images) and go out when you
+  press Send, so nothing leaves the machine by accident. Each item can be
+  removed before sending.
+
 ## [0.2.2] - 2026-10-28
 
 ### Added

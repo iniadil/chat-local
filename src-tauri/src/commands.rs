@@ -105,6 +105,54 @@ pub async fn send_files(
     Ok(sent)
 }
 
+#[derive(Serialize)]
+pub struct FileInfo {
+    pub path: String,
+    pub file_name: String,
+    pub size: u64,
+    pub mime: String,
+    /// `data:` URL of the image, for the composer preview. Only for images
+    /// under a few megabytes; larger ones show as a file chip.
+    pub preview: Option<String>,
+}
+
+/// Preview size cap: a data URL of this many bytes is cheap enough to hold
+/// in the webview while the user decides whether to send.
+const PREVIEW_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Describe a file the user dropped or picked, before it is sent. The
+/// webview cannot read arbitrary paths (the asset protocol is scoped to the
+/// app folder), so image previews travel as a data URL.
+#[tauri::command]
+pub async fn file_info(path: String) -> Result<FileInfo, String> {
+    let p = PathBuf::from(&path);
+    let meta = tokio::fs::metadata(&p)
+        .await
+        .map_err(|e| format!("{path}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{path}: not a file"));
+    }
+    // Reject oversized files now, so the user hears about it when queueing
+    // rather than when pressing Send.
+    if meta.len() > lanchat_net::MAX_ATTACHMENT_BYTES {
+        let e = lanchat_net::Error::AttachmentTooLarge(meta.len());
+        return Err(format!("{path}: {e}"));
+    }
+    let mime = mime_for(&p);
+    let file_name = p
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.clone());
+    let preview = if mime.starts_with("image/") && meta.len() <= PREVIEW_MAX_BYTES {
+        let bytes = tokio::fs::read(&p).await.map_err(|e| format!("{path}: {e}"))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        Some(format!("data:{mime};base64,{b64}"))
+    } else {
+        None
+    };
+    Ok(FileInfo { path, file_name, size: meta.len(), mime, preview })
+}
+
 #[derive(Deserialize)]
 pub struct Blob {
     pub file_name: String,
