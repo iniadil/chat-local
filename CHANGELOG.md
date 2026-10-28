@@ -4,6 +4,14 @@ All notable changes to ChatLocal are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] - 2026-10-28
+
+### Added
+
+- A microphone picker under *Settings → Voice notes*. The choice is kept per
+  computer; if that microphone is unplugged, recording falls back to the
+  system default.
+
 ## [0.2.1] - 2026-10-28
 
 ### Fixed
@@ -68,6 +76,7 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.2.2]: https://github.com/iniadil/chat-local/releases/tag/v0.2.2
 [0.2.1]: https://github.com/iniadil/chat-local/releases/tag/v0.2.1
 [0.2.0]: https://github.com/iniadil/chat-local/releases/tag/v0.2.0
 [0.1.1]: https://github.com/iniadil/chat-local/releases/tag/v0.1.1
