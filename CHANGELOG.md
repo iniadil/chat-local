@@ -6,6 +6,8 @@ All notable changes to ChatLocal are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-28
+
 ### Added
 - Send status on your own messages, like a phone messenger: a clock with the
   percentage while an attachment is on its way, a tick once it is sent, and
@@ -124,6 +126,7 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.4.0]: https://github.com/iniadil/chat-local/releases/tag/v0.4.0
 [0.3.0]: https://github.com/iniadil/chat-local/releases/tag/v0.3.0
 [0.2.2]: https://github.com/iniadil/chat-local/releases/tag/v0.2.2
 [0.2.1]: https://github.com/iniadil/chat-local/releases/tag/v0.2.1
