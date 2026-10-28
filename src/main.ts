@@ -1,7 +1,7 @@
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, bytesToBase64, type Message, type NetEvent, type Peer, type Settings, type Snapshot } from "./api";
+import { api, bytesToBase64, type Message, type NetEvent, type Peer, type Settings, type Snapshot, type TransferDirection } from "./api";
 import { applyStatic, lang, setLang, t, type Lang } from "./i18n";
 import { Recorder } from "./recorder";
 
@@ -22,6 +22,7 @@ interface State {
   names: Map<string, string>;
   active: string;
   unread: Map<string, number>;
+  transfers: Map<string, { direction: TransferDirection; done: number; total: number }>;
 }
 
 const state: State = {
@@ -36,6 +37,7 @@ const state: State = {
   names: new Map(),
   active: ALL,
   unread: new Map(),
+  transfers: new Map(),
 };
 
 const recorder = new Recorder();
@@ -624,6 +626,32 @@ function applySnapshot(snap: Snapshot) {
   if (snap.start_error) toast(snap.start_error, true);
 }
 
+function renderTransfers() {
+  const box = $("transfers");
+  box.replaceChildren();
+  for (const [key, tr] of state.transfers) {
+    const id = key.slice(0, key.indexOf(":"));
+    const pct = tr.total > 0 ? Math.floor((tr.done / tr.total) * 100) : 0;
+    const row = document.createElement("div");
+    row.className = "transfer";
+    const label = document.createElement("div");
+    if (tr.direction === "sending") {
+      const name = state.messages.find((m) => m.id === id)?.attachment?.file_name ?? "";
+      label.textContent = t().sendingFile(name, pct);
+    } else {
+      label.textContent = t().receivingFile(pct);
+    }
+    const bar = document.createElement("div");
+    bar.className = "bar";
+    const fill = document.createElement("i");
+    fill.style.width = pct + "%";
+    bar.appendChild(fill);
+    row.append(label, bar);
+    box.appendChild(row);
+  }
+  box.hidden = state.transfers.size === 0;
+}
+
 // ---------------------------------------------------------------- events
 
 function onNetEvent(e: NetEvent) {
@@ -649,6 +677,18 @@ function onNetEvent(e: NetEvent) {
       break;
     case "message":
       addMessage(e.message, true);
+      break;
+    case "transfer": {
+      const key = e.message_id + ":" + e.peer;
+      if (e.done >= e.total) state.transfers.delete(key);
+      else state.transfers.set(key, { direction: e.direction, done: e.done, total: e.total });
+      renderTransfers();
+      break;
+    }
+    case "transfer_failed":
+      state.transfers.delete(e.message_id + ":" + e.peer);
+      renderTransfers();
+      toast(t().transferFailed(e.reason), true);
       break;
     case "error":
       toast(e.message, true);

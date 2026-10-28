@@ -36,7 +36,7 @@ and macOS machines in any combination.
 |---|---|
 | **Windows** | Windows 10 version 1803 or newer, or Windows 11, 64‑bit. Needs the [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (preinstalled on Windows 11 and current Windows 10; the installer downloads it if missing). |
 | **macOS** | macOS 11 Big Sur or newer. Separate builds for Apple Silicon (M1 and later) and Intel. |
-| **Memory** | 4 GB RAM. The app itself uses about 100–150 MB; a file being sent or received is held in memory during transfer, so sending a 500 MB file briefly needs that much free RAM. |
+| **Memory** | 2 GB RAM. The app itself uses about 100–150 MB. Attachments stream from disk to disk in 256 KB pieces, so sending or receiving a large file does not need extra memory. |
 | **Disk** | About 30 MB for the app, plus space for received files (`files/` in the data folder). |
 | **Network** | Wi‑Fi or Ethernet on the same local network, TCP port 47800 (configurable) reachable between machines, and UDP port 5353 (mDNS) for automatic discovery. Internet is not needed. |
 | **Microphone** | Any built‑in or USB microphone, only for voice notes. |
@@ -139,8 +139,12 @@ installation to others; delete it to get a new identity).
 
 Each running copy of ChatLocal is a peer. It listens on a TCP port, announces
 itself with mDNS (`_chatlocal._tcp`), and opens a connection to every peer it
-learns about. Messages are JSON frames with a length prefix; attachments ride
-along as a binary payload after the JSON header. Two peers that dial each
+learns about. Messages are JSON frames with a length prefix. An attachment is
+announced by its message frame and then streamed as 256 KB chunks, each a
+small frame of its own, followed by an end marker; the receiver writes them to
+a `.part` file and renames it once the SHA-256 matches. Control frames (text,
+pings) are written ahead of queued chunks, so a text message is never stuck
+behind a large file, and a slow receiver only slows its own transfer. Two peers that dial each
 other at the same moment keep exactly one connection (the one started by the
 lower ID). A peer in server mode forwards frames between its connections and
 publishes a roster so clients can see each other through it; every peer
@@ -236,8 +240,7 @@ there:
 - Playback of voice notes (WAV is supported natively on both; the Linux test
   container had no audio stack).
 
-Other limits: attachments are held in memory during transfer and capped at
-512 MB; there is no encryption; there are no read receipts or typing
+Other limits: attachments are capped at 4 GB; there is no encryption; there are no read receipts or typing
 indicators; a message to a computer that is offline is rejected rather than
 queued.
 

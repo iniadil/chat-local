@@ -180,6 +180,10 @@ code { font-family: var(--mono); font-size: 12px; }
 
 /* ---------- composer ---------- */
 .composer { padding: 10px 16px 14px; border-top: 1px solid var(--line); background: var(--paper); }
+.transfers { display: flex; flex-direction: column; gap: 6px; padding: 0 4px 8px; }
+.transfer { font-size: 12px; color: var(--muted, inherit); }
+.transfer .bar { height: 4px; border-radius: 2px; margin-top: 4px; background: color-mix(in srgb, var(--accent) 18%, transparent); overflow: hidden; }
+.transfer .bar i { display: block; height: 100%; background: var(--accent); transition: width 0.2s; }
 .composer-row {
   display: flex; align-items: flex-end; gap: 6px;
   background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 6px;

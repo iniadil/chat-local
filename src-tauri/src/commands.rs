@@ -107,16 +107,8 @@ pub async fn send_files(
                 lanchat_net::MAX_ATTACHMENT_BYTES / (1024 * 1024)
             ));
         }
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| format!("{p}: {e}"))?;
-        let file_name = path
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "file".into());
-        let mime = mime_for(&path);
         let msg = node
-            .send_bytes(to.clone(), file_name, mime, bytes, None)
+            .import_file(to.clone(), &path, Some(mime_for(&path)))
             .await
             .map_err(|e| e.to_string())?;
         sent.push(msg);

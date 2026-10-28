@@ -60,6 +60,9 @@ const strings = {
     unreachable: "Komputer tujuan tidak terjangkau",
     tooLarge: "Berkas terlalu besar",
     copied: "Disalin",
+    sendingFile: (name: string, pct: number) => `Mengirim ${name}… ${pct}%`,
+    receivingFile: (pct: number) => `Menerima berkas… ${pct}%`,
+    transferFailed: (reason: string) => `Berkas gagal dikirim: ${reason}`,
   },
   en: {
     everyone: "Everyone",
@@ -120,6 +123,9 @@ const strings = {
     unreachable: "The other computer cannot be reached",
     tooLarge: "File is too large",
     copied: "Copied",
+    sendingFile: (name: string, pct: number) => `Sending ${name}… ${pct}%`,
+    receivingFile: (pct: number) => `Receiving a file… ${pct}%`,
+    transferFailed: (reason: string) => `File transfer failed: ${reason}`,
   },
 } as const;
 

@@ -7,10 +7,14 @@
 //! ```
 //!
 //! `total` counts everything after itself. `json` is a [`Frame`]. `payload`
-//! is only non-empty for [`Frame::Message`] carrying an attachment, in which
-//! case it holds the raw attachment bytes.
+//! is only non-empty for [`Frame::Chunk`], where it holds up to
+//! [`CHUNK_BYTES`] of attachment data. An attachment travels as a
+//! [`Frame::Message`] announcing it, then its chunks, then [`Frame::End`]
+//! (or [`Frame::Abort`] if the sender gave up), all tagged with the
+//! message id. Chunks of different transfers, and control frames, may be
+//! interleaved on one connection.
 
-use crate::types::{Message, PeerId, MAX_FRAME_BYTES};
+use crate::types::{Message, PeerId, CHUNK_BYTES, MAX_FRAME_BYTES};
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -32,8 +36,22 @@ pub enum Frame {
         version: u32,
         relay: bool,
     },
+    /// A text message, or the announcement of an attachment whose bytes
+    /// follow as chunks.
     Message {
         message: Message,
+    },
+    /// One piece of the attachment of message `id`; the bytes are the payload.
+    Chunk {
+        id: String,
+    },
+    /// Every chunk of `id` has been sent.
+    End {
+        id: String,
+    },
+    /// The sender could not finish `id`; discard what was received.
+    Abort {
+        id: String,
     },
     /// Sent by relays: the peers currently connected to it.
     Roster {
@@ -54,6 +72,14 @@ impl Packet {
         Self {
             frame,
             payload: Vec::new(),
+        }
+    }
+
+    pub fn chunk(id: &str, payload: Vec<u8>) -> Self {
+        debug_assert!(payload.len() <= CHUNK_BYTES);
+        Self {
+            frame: Frame::Chunk { id: id.to_string() },
+            payload,
         }
     }
 }
@@ -95,6 +121,9 @@ pub async fn read_packet<R: AsyncRead + Unpin>(r: &mut R) -> Result<Packet, Erro
     r.read_exact(&mut json).await?;
     let frame: Frame = serde_json::from_slice(&json)?;
     let payload_len = total - 4 - json_len;
+    if payload_len > 0 && !matches!(frame, Frame::Chunk { .. }) {
+        return Err(Error::Protocol("payload on a non-chunk frame".into()));
+    }
     let mut payload = vec![0u8; payload_len];
     if payload_len > 0 {
         r.read_exact(&mut payload).await?;
@@ -108,16 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn roundtrip_with_payload() {
-        let pkt = Packet {
-            frame: Frame::Hello {
-                id: "a".into(),
-                name: "Alice".into(),
-                port: 1,
-                version: 1,
-                relay: false,
-            },
-            payload: vec![1, 2, 3, 4, 5],
-        };
+        let pkt = Packet::chunk("m1", vec![1, 2, 3, 4, 5]);
         let mut buf = Vec::new();
         write_packet(&mut buf, &pkt).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -134,6 +154,21 @@ mod tests {
         assert!(matches!(
             read_packet(&mut cur).await,
             Err(Error::FrameTooLarge(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_payload_on_control_frame() {
+        let pkt = Packet {
+            frame: Frame::Ping,
+            payload: vec![0; 10],
+        };
+        let mut buf = Vec::new();
+        write_packet(&mut buf, &pkt).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        assert!(matches!(
+            read_packet(&mut cur).await,
+            Err(Error::Protocol(_))
         ));
     }
 }

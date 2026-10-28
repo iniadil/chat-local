@@ -56,7 +56,11 @@ export type NetEvent =
   | { type: "peer_online"; peer: Peer }
   | { type: "peer_offline"; id: string }
   | { type: "message"; message: Message }
+  | { type: "transfer"; message_id: string; peer: string; direction: TransferDirection; done: number; total: number }
+  | { type: "transfer_failed"; message_id: string; peer: string; direction: TransferDirection; reason: string }
   | { type: "error"; message: string };
+
+export type TransferDirection = "sending" | "receiving";
 
 export const api = {
   snapshot: () => invoke<Snapshot>("app_snapshot"),
