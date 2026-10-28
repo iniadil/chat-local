@@ -398,10 +398,18 @@ function applyStatus(wrap: HTMLElement, m: Message) {
   retry.textContent = t().retry;
   retry.onclick = async () => {
     retry.disabled = true;
+    // The new attempt reports under the connection it takes, which is a
+    // relay's when the peer is not directly connected, so the old failures
+    // must go first or they would outlive a delivery. Peers it cannot reach
+    // come back as fresh failures.
+    const out = outgoingOf(m.id);
+    const old = st.peers.map((p) => [p, out.get(p)] as const);
+    for (const p of st.peers) out.delete(p);
     try {
       await api.resendAttachment(m.id, st.peers);
     } catch (e) {
-      retry.disabled = false;
+      for (const [p, o] of old) if (o && !out.has(p)) out.set(p, o);
+      updateStatus(m.id);
       toast(friendlyError(e), true);
     }
   };
