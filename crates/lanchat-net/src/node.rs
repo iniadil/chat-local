@@ -124,6 +124,14 @@ impl Seen {
         }
         true
     }
+
+    /// Forget `id` so a later copy of it is taken again (a failed transfer
+    /// the sender retries).
+    fn remove(&mut self, id: &str) {
+        if self.set.remove(id) {
+            self.order.retain(|o| o != id);
+        }
+    }
 }
 
 pub struct Node {
@@ -456,14 +464,88 @@ impl Node {
         let targets = self.route(&msg, None)?;
         // The header is already on its way: stream the bytes whatever happens
         // to the local history, or every peer would wait for chunks forever.
-        for t in targets {
-            let node = self.clone();
-            let id = msg.id.clone();
-            let path = path.clone();
-            tokio::spawn(async move { node.stream_to(id, path, total, t).await });
-        }
+        self.start_streams(&msg.id, &path, total, targets).await;
         self.store.lock().unwrap().append(msg.clone())?;
         Ok(msg)
+    }
+
+    /// Send the attachment of a message we sent earlier again, to `peers`
+    /// (the ones its transfer failed for). Each takes the same message id; a
+    /// receiver forgets the id of a transfer that failed, so it accepts it.
+    pub async fn resend(self: &Arc<Self>, message_id: &str, peers: &[PeerId]) -> Result<(), Error> {
+        let msg = self
+            .find_message(message_id)
+            .filter(|m| m.from == self.identity.id)
+            .ok_or_else(|| Error::Other("no such message".into()))?;
+        let att = msg
+            .attachment
+            .as_ref()
+            .ok_or_else(|| Error::Other("message has no attachment".into()))?;
+        let path = att
+            .path
+            .clone()
+            .ok_or_else(|| Error::Other("attachment file is missing".into()))?;
+        let total = att.size;
+        let pkt = Arc::new(Packet::frame(Frame::Message {
+            message: msg.for_wire(),
+        }));
+        let candidates: Vec<Target> = {
+            let inner = self.inner.lock().unwrap();
+            let mut v: Vec<Target> = Vec::new();
+            for p in peers {
+                // Directly if we can, else through every relay.
+                let via: Vec<&Conn> = match inner.conns.get(p) {
+                    Some(c) => vec![c],
+                    None => inner.conns.values().filter(|c| c.info.relay).collect(),
+                };
+                for c in via {
+                    if !v.iter().any(|t| t.id == c.info.id) {
+                        v.push(Target {
+                            id: c.info.id.clone(),
+                            tx: c.tx.clone(),
+                            data_tx: c.data_tx.clone(),
+                        });
+                    }
+                }
+            }
+            v
+        };
+        let targets: Vec<Target> = candidates
+            .into_iter()
+            .filter(|t| t.tx.try_send(pkt.clone()).is_ok())
+            .collect();
+        if targets.is_empty() {
+            let who = peers.first().cloned().unwrap_or_default();
+            return Err(Error::Unreachable(who));
+        }
+        self.start_streams(&msg.id, &path, total, targets).await;
+        Ok(())
+    }
+
+    /// Stream an announced attachment to each target in the background. A
+    /// zero progress event per target comes first, so the UI knows whom the
+    /// message is going to before any byte moves.
+    async fn start_streams(
+        self: &Arc<Self>,
+        id: &str,
+        path: &Path,
+        total: u64,
+        targets: Vec<Target>,
+    ) {
+        for t in targets {
+            self.emit(Event::Transfer {
+                message_id: id.to_string(),
+                peer: t.id.clone(),
+                direction: TransferDirection::Sending,
+                done: 0,
+                total,
+            })
+            .await;
+            let node = self.clone();
+            let id = id.to_string();
+            let path = path.to_path_buf();
+            tokio::spawn(async move { node.stream_to(id, path, total, t).await });
+        }
     }
 
     /// Read the file in chunks and push them into one connection's data
@@ -924,10 +1006,28 @@ impl Node {
                     }
                 }
             }
+            // A dead writer means a dead connection: end the reader too,
+            // rather than keep listing a peer nothing can reach.
+            writer_cancel.cancel();
             let _ = wr.shutdown().await;
         });
 
-        // Reader.
+        // Reader. `read_packet` is not cancel-safe: dropped halfway through a
+        // chunk it loses the bytes already read and the stream falls out of
+        // step. So frames are read whole in their own task and handed over.
+        let (packets_tx, mut packets) = mpsc::channel::<Result<Packet, Error>>(1);
+        let reader = tokio::spawn(async move {
+            loop {
+                let pkt = match timeout(READ_TIMEOUT, read_packet(&mut rd)).await {
+                    Ok(r) => r,
+                    Err(_) => Err(Error::Protocol("peer went silent".into())),
+                };
+                let failed = pkt.is_err();
+                if packets_tx.send(pkt).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
         let mut incoming: HashMap<String, Incoming> = HashMap::new();
         let result: Result<(), Error> = async {
             let mut ping = tokio::time::interval(PING_INTERVAL);
@@ -940,14 +1040,15 @@ impl Node {
                         let _ = tx.try_send(Arc::new(Packet::frame(Frame::Ping)));
                         self.expire_incoming(&id, &mut incoming).await;
                     }
-                    pkt = timeout(READ_TIMEOUT, read_packet(&mut rd)) => {
-                        let pkt = pkt.map_err(|_| Error::Protocol("peer went silent".into()))??;
+                    pkt = packets.recv() => {
+                        let pkt = pkt.ok_or_else(|| Error::Protocol("reader stopped".into()))??;
                         self.handle_packet(&id, &tx, pkt, &mut incoming).await;
                     }
                 }
             }
         }
         .await;
+        reader.abort();
 
         // Whatever was still streaming in is lost; tell everyone downstream.
         for (mid, inc) in incoming.drain() {
@@ -1208,6 +1309,7 @@ impl Node {
                 inc.message.from_name
             );
             let _ = tokio::fs::remove_file(&partial).await;
+            self.seen.lock().unwrap().remove(&id);
             self.emit(Event::TransferFailed {
                 message_id: id,
                 peer: from.clone(),
@@ -1244,6 +1346,8 @@ impl Node {
         for t in inc.forward.drain(..) {
             let _ = t.tx.try_send(abort.clone());
         }
+        // Nothing was delivered: take the message again if the sender retries.
+        self.seen.lock().unwrap().remove(&id);
         if let Some((f, partial)) = inc.file.take() {
             drop(f);
             let _ = tokio::fs::remove_file(&partial).await;

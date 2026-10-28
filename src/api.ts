@@ -91,6 +91,7 @@ export const api = {
   fileInfo: (path: string) => invoke<FileInfo>("file_info", { path }),
   sendBlob: (to: string | null, blob: { file_name: string; mime: string; data: string; duration_ms?: number }) =>
     invoke<Message>("send_blob", { to, blob }),
+  resendAttachment: (messageId: string, peers: string[]) => invoke<void>("resend_attachment", { messageId, peers }),
   connectPeer: (target: string) => invoke<void>("connect_peer", { target }),
   discoveredPeers: () => invoke<FoundPeer[]>("discovered_peers"),
   scanNetwork: () => invoke<FoundPeer[]>("scan_network"),

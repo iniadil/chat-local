@@ -152,6 +152,12 @@ code { font-family: var(--mono); font-size: 12px; }
 .time { font-size: 10px; color: var(--ink-3); margin-top: 3px; text-align: right; user-select: none; }
 .msg.mine .time { color: color-mix(in srgb, var(--mine-ink) 60%, transparent); }
 .bubble.media { padding: 4px; }
+.tick { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; vertical-align: -2px; font-variant-numeric: tabular-nums; }
+.tick.failed { color: var(--danger); font-weight: 700; }
+.bubble.media .tick.failed { color: #ffb3a6; }
+.send-failed { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 3px; font-size: 11px; color: var(--danger); }
+.send-failed button { font: inherit; font-weight: 600; color: var(--accent); background: none; border: none; padding: 0; cursor: pointer; text-decoration: underline; }
+.send-failed button:disabled { opacity: 0.5; cursor: default; }
 .bubble.media .time { position: absolute; right: 10px; bottom: 8px; background: rgba(0,0,0,0.45); color: #fff; padding: 1px 6px; border-radius: 8px; }
 .bubble img.photo { display: block; max-width: 100%; max-height: min(360px, 50vh); border-radius: 10px; cursor: zoom-in; }
 

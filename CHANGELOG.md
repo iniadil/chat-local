@@ -6,6 +6,23 @@ All notable changes to ChatLocal are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Send status on your own messages, like a phone messenger: a clock with the
+  percentage while an attachment is on its way, a tick once it is sent, and
+  *Not sent · Retry* under the bubble when it did not get through. Retry
+  sends the same message again only to the computers that missed it. The
+  progress bar above the message box now only shows files coming in.
+
+### Fixed
+- Attachments that took longer than about 25 seconds to send (large images
+  or files over Wi‑Fi) failed near the end with "connection closed" on the
+  receiver and an unreachable error on the sender. A keepalive ping that
+  fired while a chunk was half read discarded the bytes already read, so
+  the stream fell out of step and the connection dropped. Frames are now
+  read whole in their own task.
+- A connection whose writer failed stayed listed as online until the read
+  side noticed; it now closes at once.
+
 ## [0.3.0] - 2026-10-28
 
 ### Added

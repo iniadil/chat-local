@@ -1,7 +1,7 @@
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, bytesToBase64, type FoundPeer, type Message, type NetEvent, type Peer, type Settings, type Snapshot, type TransferDirection } from "./api";
+import { api, bytesToBase64, type FoundPeer, type Message, type NetEvent, type Peer, type Settings, type Snapshot } from "./api";
 import { applyStatic, lang, setLang, t, type Lang } from "./i18n";
 import { Recorder, listMics, preferredMic, setPreferredMic } from "./recorder";
 
@@ -23,7 +23,17 @@ interface State {
   names: Map<string, string>;
   active: string;
   unread: Map<string, number>;
-  transfers: Map<string, { direction: TransferDirection; done: number; total: number }>;
+  /** Attachments coming in, keyed by `message_id:peer`. */
+  transfers: Map<string, { done: number; total: number }>;
+  /** Attachments we sent this session, per recipient connection. */
+  outgoing: Map<string, Map<string, Outgoing>>;
+}
+
+interface Outgoing {
+  done: number;
+  total: number;
+  /** Why the transfer failed; absent while running or once complete. */
+  error?: string;
 }
 
 const state: State = {
@@ -40,6 +50,7 @@ const state: State = {
   active: ALL,
   unread: new Map(),
   transfers: new Map(),
+  outgoing: new Map(),
 };
 
 const recorder = new Recorder();
@@ -285,6 +296,7 @@ function renderMessage(m: Message, cont: boolean) {
   const mine = m.from === state.me.id;
   const wrap = document.createElement("div");
   wrap.className = "msg" + (mine ? " mine" : "") + (cont ? " cont" : "");
+  wrap.dataset.id = m.id;
   wrap.appendChild(avatar(m.from, m.from_name, true));
   const col = document.createElement("div");
   col.style.minWidth = "0";
@@ -323,7 +335,84 @@ function renderMessage(m: Message, cont: boolean) {
   }
   col.appendChild(bubble);
   wrap.appendChild(col);
+  if (mine) applyStatus(wrap, m);
   return wrap;
+}
+
+// ---------- send status ----------
+// Like a phone messenger: a clock while an attachment is on its way, a tick
+// once it is sent, and a retry link when it did not get through.
+
+type SendStatus = { kind: "sending"; pct: number } | { kind: "sent" } | { kind: "failed"; peers: string[]; reason: string };
+
+function sendStatus(m: Message): SendStatus | null {
+  // Text either leaves at once or the send call fails.
+  if (!m.attachment) return { kind: "sent" };
+  const entries = state.outgoing.get(m.id);
+  // Sent in an earlier session (or to nobody): nothing is known.
+  if (!entries || entries.size === 0) return null;
+  const failed = [...entries].filter(([, o]) => o.error);
+  if (failed.length) return { kind: "failed", peers: failed.map(([p]) => p), reason: failed[0][1].error! };
+  let done = 0;
+  let total = 0;
+  for (const o of entries.values()) {
+    done += o.done;
+    total += o.total;
+  }
+  if (done < total) return { kind: "sending", pct: Math.floor((done / total) * 100) };
+  return { kind: "sent" };
+}
+
+const ICON_CLOCK = '<svg viewBox="0 0 16 16" width="11" height="11"><circle cx="8" cy="8" r="6.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5V8l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
+const ICON_TICK = '<svg viewBox="0 0 16 16" width="12" height="12"><path d="M3 8.5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+/** (Re)draw the status of one of our messages: the mark next to its time
+ * and, after a failure, the retry line under the bubble. */
+function applyStatus(wrap: HTMLElement, m: Message) {
+  wrap.querySelector(".tick")?.remove();
+  wrap.querySelector(".send-failed")?.remove();
+  const st = sendStatus(m);
+  if (!st) return;
+  const tick = document.createElement("span");
+  tick.className = "tick " + st.kind;
+  if (st.kind === "sending") {
+    tick.innerHTML = ICON_CLOCK;
+    tick.append(` ${st.pct}%`);
+    tick.title = t().sending;
+  } else if (st.kind === "sent") {
+    tick.innerHTML = ICON_TICK;
+    tick.title = t().sent;
+  } else {
+    tick.textContent = "!";
+    tick.title = st.reason;
+  }
+  wrap.querySelector(".time")?.appendChild(tick);
+  if (st.kind !== "failed") return;
+  const row = document.createElement("div");
+  row.className = "send-failed";
+  const label = document.createElement("span");
+  label.textContent = t().sendFailed;
+  label.title = st.reason;
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.textContent = t().retry;
+  retry.onclick = async () => {
+    retry.disabled = true;
+    try {
+      await api.resendAttachment(m.id, st.peers);
+    } catch (e) {
+      retry.disabled = false;
+      toast(friendlyError(e), true);
+    }
+  };
+  row.append(label, retry);
+  wrap.querySelector(".bubble")?.parentElement?.appendChild(row);
+}
+
+function updateStatus(id: string) {
+  const m = state.messages.find((x) => x.id === id);
+  const wrap = $("messages").querySelector<HTMLElement>(`.msg[data-id="${CSS.escape(id)}"]`);
+  if (m && wrap) applyStatus(wrap, m);
 }
 
 function fileCard(m: Message) {
@@ -956,18 +1045,12 @@ function applySnapshot(snap: Snapshot) {
 function renderTransfers() {
   const box = $("transfers");
   box.replaceChildren();
-  for (const [key, tr] of state.transfers) {
-    const id = key.slice(0, key.indexOf(":"));
+  for (const tr of state.transfers.values()) {
     const pct = tr.total > 0 ? Math.floor((tr.done / tr.total) * 100) : 0;
     const row = document.createElement("div");
     row.className = "transfer";
     const label = document.createElement("div");
-    if (tr.direction === "sending") {
-      const name = state.messages.find((m) => m.id === id)?.attachment?.file_name ?? "";
-      label.textContent = t().sendingFile(name, pct);
-    } else {
-      label.textContent = t().receivingFile(pct);
-    }
+    label.textContent = t().receivingFile(pct);
     const bar = document.createElement("div");
     bar.className = "bar";
     const fill = document.createElement("i");
@@ -980,6 +1063,12 @@ function renderTransfers() {
 }
 
 // ---------------------------------------------------------------- events
+
+function outgoingOf(id: string) {
+  let m = state.outgoing.get(id);
+  if (!m) state.outgoing.set(id, (m = new Map()));
+  return m;
+}
 
 function onNetEvent(e: NetEvent) {
   switch (e.type) {
@@ -1012,16 +1101,30 @@ function onNetEvent(e: NetEvent) {
       addMessage(e.message, true);
       break;
     case "transfer": {
+      if (e.direction === "sending") {
+        outgoingOf(e.message_id).set(e.peer, { done: e.done, total: e.total });
+        updateStatus(e.message_id);
+        break;
+      }
       const key = e.message_id + ":" + e.peer;
       if (e.done >= e.total) state.transfers.delete(key);
-      else state.transfers.set(key, { direction: e.direction, done: e.done, total: e.total });
+      else state.transfers.set(key, { done: e.done, total: e.total });
       renderTransfers();
       break;
     }
     case "transfer_failed":
+      if (e.direction === "sending") {
+        const out = outgoingOf(e.message_id);
+        out.set(e.peer, { done: out.get(e.peer)?.done ?? 0, total: out.get(e.peer)?.total ?? 0, error: e.reason });
+        updateStatus(e.message_id);
+        // The bubble shows it; speak up only when it is out of sight.
+        const m = state.messages.find((x) => x.id === e.message_id);
+        if (!m || conversationOf(m) !== state.active) toast(t().transferFailed(e.reason), true);
+        break;
+      }
       state.transfers.delete(e.message_id + ":" + e.peer);
       renderTransfers();
-      toast(t().transferFailed(e.reason), true);
+      toast(t().receiveFailed(e.reason), true);
       break;
     case "error":
       toast(e.message, true);
@@ -1073,6 +1176,7 @@ async function main() {
       await api.clearHistory();
       state.messages = [];
       state.unread.clear();
+      state.outgoing.clear();
       renderAll();
       $("settings-modal").hidden = true;
     } catch (e) {

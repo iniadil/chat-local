@@ -37,6 +37,7 @@ pub fn run() {
             commands::send_files,
             commands::file_info,
             commands::send_blob,
+            commands::resend_attachment,
             commands::discovered_peers,
             commands::scan_network,
             commands::connect_peer,

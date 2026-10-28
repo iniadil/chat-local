@@ -201,6 +201,20 @@ pub async fn send_blob(
         .map_err(|e| e.to_string())
 }
 
+/// Send an attachment whose transfer failed again, to the peers it failed
+/// for.
+#[tauri::command]
+pub async fn resend_attachment(
+    state: State<'_, AppState>,
+    message_id: String,
+    peers: Vec<String>,
+) -> Result<(), String> {
+    node_or_err(&state)?
+        .resend(&message_id, &peers)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Peers announced over mDNS, for the "Add computer" dialog. Instant.
 #[tauri::command]
 pub fn discovered_peers(state: State<'_, AppState>) -> Result<Vec<FoundPeer>, String> {
