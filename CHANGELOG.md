@@ -6,6 +6,8 @@ All notable changes to ChatLocal are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-28
+
 ### Added
 - A welcome screen on first launch asks for your name or the device's name
   (prefilled with the computer name), so people recognise you when you show
@@ -22,6 +24,16 @@ All notable changes to ChatLocal are documented here. The format follows
   previews above the message box (thumbnail for images) and go out when you
   press Send, so nothing leaves the machine by accident. Each item can be
   removed before sending.
+
+### Fixed
+- Ticking *Remember and reconnect automatically* in *Add computer…* no
+  longer drops the connection that was just made. Changing only the manual
+  addresses no longer restarts networking; new addresses are dialed right
+  away.
+- A manual address reached through a port forward is no longer redialed
+  every few seconds, which kept replacing the working connection.
+- The message box stays visible when the window is made smaller; the
+  message and conversation lists scroll instead.
 
 ## [0.2.2] - 2026-10-28
 
@@ -95,6 +107,7 @@ First public release.
 - Messages to an offline computer are rejected rather than queued.
 - Not yet verified on physical Windows or macOS hardware; see the README.
 
+[0.3.0]: https://github.com/iniadil/chat-local/releases/tag/v0.3.0
 [0.2.2]: https://github.com/iniadil/chat-local/releases/tag/v0.2.2
 [0.2.1]: https://github.com/iniadil/chat-local/releases/tag/v0.2.1
 [0.2.0]: https://github.com/iniadil/chat-local/releases/tag/v0.2.0
