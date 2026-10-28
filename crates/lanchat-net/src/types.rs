@@ -137,6 +137,30 @@ pub struct PeerInfo {
     pub via: Option<PeerId>,
 }
 
+/// How a peer was found before any connection existed.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FoundVia {
+    /// Announced itself with mDNS/Bonjour.
+    Mdns,
+    /// Answered a probe during an active subnet scan.
+    Scan,
+}
+
+/// A ChatLocal installation seen on the network, whether or not we are
+/// connected to it yet. What the "Add computer" dialog lists.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FoundPeer {
+    pub id: PeerId,
+    pub name: String,
+    /// `ip:port` to connect to.
+    pub addr: String,
+    pub relay: bool,
+    pub via: FoundVia,
+    /// We already hold a connection to this peer.
+    pub connected: bool,
+}
+
 /// Something the UI should know about.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]

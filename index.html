@@ -145,19 +145,50 @@
           <h2 data-i18n="addComputer"></h2>
           <button class="icon-btn" id="btn-peer-close" aria-label="Close">✕</button>
         </header>
-        <form id="peer-form" class="form">
-          <label>
-            <span data-i18n="peerAddress"></span>
-            <input name="target" placeholder="192.168.1.20 or 192.168.1.20:47800" required />
-            <small data-i18n="peerAddressHelp"></small>
-          </label>
+        <div class="form">
+          <section class="found">
+            <div class="found-head">
+              <span class="found-title" data-i18n="foundTitle"></span>
+              <span class="spacer"></span>
+              <span class="found-status" id="found-status"></span>
+              <button type="button" class="text-btn" id="btn-scan" data-i18n="scanAgain"></button>
+            </div>
+            <div class="found-list" id="found-list"></div>
+            <small data-i18n="foundHelp"></small>
+          </section>
           <label class="row">
-            <input type="checkbox" name="remember" checked />
+            <input type="checkbox" id="peer-remember" checked />
             <span data-i18n="rememberPeer"></span>
+          </label>
+          <div class="or"><span data-i18n="orManual"></span></div>
+          <form id="peer-form" class="manual">
+            <label>
+              <span data-i18n="peerAddress"></span>
+              <div class="manual-row">
+                <input name="target" placeholder="192.168.1.20 or 192.168.1.20:47800" required />
+                <button type="submit" class="primary-btn" data-i18n="connect"></button>
+              </div>
+              <small data-i18n="peerAddressHelp"></small>
+            </label>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal" id="welcome-modal" hidden>
+      <div class="modal-card small">
+        <form id="welcome-form" class="form welcome">
+          <div class="welcome-mark">#</div>
+          <h2 data-i18n="welcomeTitle"></h2>
+          <p data-i18n="welcomeIntro"></p>
+          <label>
+            <span data-i18n="welcomeName"></span>
+            <input name="display_name" maxlength="48" autocomplete="off" required />
+            <small data-i18n="welcomeNameHelp"></small>
           </label>
           <footer class="modal-foot">
             <span class="spacer"></span>
-            <button type="submit" class="primary-btn" data-i18n="connect"></button>
+            <button type="submit" class="primary-btn" data-i18n="welcomeStart"></button>
           </footer>
         </form>
       </div>

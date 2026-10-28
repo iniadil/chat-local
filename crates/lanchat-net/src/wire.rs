@@ -14,7 +14,7 @@
 //! message id. Chunks of different transfers, and control frames, may be
 //! interleaved on one connection.
 
-use crate::types::{Message, PeerId, CHUNK_BYTES, MAX_FRAME_BYTES};
+use crate::types::{Message, PeerId, CHUNK_BYTES, MAX_FRAME_BYTES, PROTOCOL_VERSION};
 use crate::Error;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -59,6 +59,43 @@ pub enum Frame {
     },
     Ping,
     Pong,
+}
+
+/// What a peer said about itself in its [`Frame::Hello`], once checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hello {
+    pub id: PeerId,
+    pub name: String,
+    pub port: u16,
+    pub relay: bool,
+}
+
+impl Frame {
+    /// Interpret the first frame of a connection: it must be a hello from a
+    /// peer that speaks our protocol version.
+    pub fn into_hello(self) -> Result<Hello, Error> {
+        let Frame::Hello {
+            id,
+            name,
+            port,
+            version,
+            relay,
+        } = self
+        else {
+            return Err(Error::Protocol("expected hello".into()));
+        };
+        if version != PROTOCOL_VERSION {
+            return Err(Error::Protocol(format!(
+                "peer speaks protocol v{version}, we speak v{PROTOCOL_VERSION}"
+            )));
+        }
+        Ok(Hello {
+            id,
+            name,
+            port,
+            relay,
+        })
+    }
 }
 
 #[derive(Clone, Debug)]

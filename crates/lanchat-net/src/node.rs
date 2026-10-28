@@ -1,7 +1,7 @@
 //! The node: listener, outgoing connections, discovery glue, relaying and the
 //! public send API.
 
-use crate::discovery::{Discovered, Discovery};
+use crate::discovery::{Discovered, Discovery, DiscoveryEvent};
 use crate::store::{copy_hashed, hash_file, Store};
 use crate::types::*;
 use crate::wire::{read_packet, write_packet, Frame, Packet, RosterEntry};
@@ -92,8 +92,8 @@ struct Inner {
     rosters: HashMap<PeerId, Vec<RosterEntry>>,
     /// Peers reachable only through a relay, derived from `rosters`.
     via_relay: HashMap<PeerId, PeerInfo>,
-    /// Addresses learned from discovery, by peer id.
-    known_addrs: HashMap<PeerId, Vec<SocketAddr>>,
+    /// Peers learned from discovery, by peer id.
+    known: HashMap<PeerId, Discovered>,
     /// Addresses with a connection attempt in flight.
     connecting: HashSet<SocketAddr>,
     /// Addresses that turned out to be this very node (someone typed our own
@@ -216,7 +216,8 @@ impl Node {
                             tokio::select! {
                                 _ = n.shutdown.cancelled() => break,
                                 found = rx.recv() => match found {
-                                    Some(d) => n.on_discovered(d).await,
+                                    Some(DiscoveryEvent::Found(d)) => n.on_discovered(d),
+                                    Some(DiscoveryEvent::Lost(id)) => n.on_lost(&id),
                                     None => break,
                                 }
                             }
@@ -636,9 +637,64 @@ impl Node {
         }
     }
 
-    async fn on_discovered(&self, d: Discovered) {
+    fn on_discovered(&self, d: Discovered) {
         let mut inner = self.inner.lock().unwrap();
-        inner.known_addrs.insert(d.id.clone(), d.addrs);
+        inner.known.insert(d.id.clone(), d);
+    }
+
+    /// The peer's mDNS announcement is gone: stop listing and dialing it. An
+    /// existing connection is left alone; it ends on its own if the peer
+    /// really left.
+    fn on_lost(&self, id: &PeerId) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.known.remove(id);
+    }
+
+    /// Peers that announced themselves with mDNS, connected or not.
+    pub fn discovered(&self) -> Vec<FoundPeer> {
+        let inner = self.inner.lock().unwrap();
+        let mut v: Vec<FoundPeer> = inner
+            .known
+            .values()
+            .filter_map(|d| {
+                let addr = d.addrs.first()?;
+                let mut p = FoundPeer {
+                    id: d.id.clone(),
+                    name: d.name.clone(),
+                    addr: addr.to_string(),
+                    relay: false,
+                    via: FoundVia::Mdns,
+                    connected: false,
+                };
+                overlay_conn(&inner, &mut p);
+                Some(p)
+            })
+            .collect();
+        v.sort_by_key(|p| p.name.to_lowercase());
+        v
+    }
+
+    /// Actively look for ChatLocal on every `/24` this machine sits in, on
+    /// our own port and the default one. Takes a few seconds. The result is
+    /// merged with what mDNS already knows, one entry per peer.
+    pub async fn scan_lan(&self) -> Vec<FoundPeer> {
+        let subnets = crate::scan::subnets_of(&crate::local_ipv4());
+        let ports = [self.port, DEFAULT_PORT];
+        let scanned = crate::scan::scan(&subnets, &ports, &self.identity.id).await;
+
+        let mut out = self.discovered();
+        {
+            let inner = self.inner.lock().unwrap();
+            for mut p in scanned {
+                if out.iter().any(|o| o.id == p.id) {
+                    continue;
+                }
+                overlay_conn(&inner, &mut p);
+                out.push(p);
+            }
+        }
+        out.sort_by_key(|p| p.name.to_lowercase());
+        out
     }
 
     /// Try every address we should be connected to but are not.
@@ -646,7 +702,7 @@ impl Node {
         let mut targets: Vec<(Option<PeerId>, String)> = Vec::new();
         {
             let inner = self.inner.lock().unwrap();
-            for (id, addrs) in &inner.known_addrs {
+            for (id, d) in &inner.known {
                 if inner.conns.contains_key(id) {
                     continue;
                 }
@@ -655,7 +711,7 @@ impl Node {
                 if self.identity.id > *id {
                     continue;
                 }
-                if let Some(a) = addrs.first() {
+                if let Some(a) = d.addrs.first() {
                     targets.push((Some(id.clone()), a.to_string()));
                 }
             }
@@ -747,21 +803,12 @@ impl Node {
         let hello = timeout(HELLO_TIMEOUT, read_packet(&mut rd))
             .await
             .map_err(|_| Error::Protocol("handshake timed out".into()))??;
-        let Frame::Hello {
+        let crate::wire::Hello {
             id,
             name,
             port,
-            version,
             relay,
-        } = hello.frame
-        else {
-            return Err(Error::Protocol("expected hello".into()));
-        };
-        if version != PROTOCOL_VERSION {
-            return Err(Error::Protocol(format!(
-                "peer speaks protocol v{version}, we speak v{PROTOCOL_VERSION}"
-            )));
-        }
+        } = hello.frame.into_hello()?;
         if id == self.identity.id {
             // Discovered our own announcement, or someone typed our own address.
             if initiated_by_me {
@@ -1292,6 +1339,20 @@ fn file_name_of(path: &Path) -> String {
 }
 
 /// `host` -> `host:DEFAULT_PORT`; `host:port` unchanged; IPv6 needs brackets.
+/// What a live connection knows about a found peer beats what discovery or
+/// a probe said: its current name, the address we actually talk to, and
+/// whether it is a relay.
+fn overlay_conn(inner: &Inner, p: &mut FoundPeer) {
+    if let Some(c) = inner.conns.get(&p.id) {
+        p.connected = true;
+        p.name = c.info.name.clone();
+        if let Some(a) = &c.info.addr {
+            p.addr = a.clone();
+        }
+        p.relay = c.info.relay;
+    }
+}
+
 pub fn normalize_target(s: &str) -> String {
     let s = s.trim();
     if s.starts_with('[') {

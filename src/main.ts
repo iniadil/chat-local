@@ -1,7 +1,7 @@
 import { confirm as confirmDialog, open as openDialog } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { api, bytesToBase64, type Message, type NetEvent, type Peer, type Settings, type Snapshot, type TransferDirection } from "./api";
+import { api, bytesToBase64, type FoundPeer, type Message, type NetEvent, type Peer, type Settings, type Snapshot, type TransferDirection } from "./api";
 import { applyStatic, lang, setLang, t, type Lang } from "./i18n";
 import { Recorder, listMics, preferredMic, setPreferredMic } from "./recorder";
 
@@ -16,6 +16,7 @@ interface State {
   addresses: string[];
   dataDir: string;
   startError: string | null;
+  firstRun: boolean;
   peers: Map<string, Peer>;
   messages: Message[];
   /** Names of peers we have ever talked to, for history of offline peers. */
@@ -32,6 +33,7 @@ const state: State = {
   addresses: [],
   dataDir: "",
   startError: null,
+  firstRun: false,
   peers: new Map(),
   messages: [],
   names: new Map(),
@@ -736,13 +738,122 @@ async function submitSettings(ev: Event) {
   }
 }
 
-async function submitPeer(ev: Event) {
-  ev.preventDefault();
-  const f = $<HTMLFormElement>("peer-form");
-  const target = (f.elements.namedItem("target") as HTMLInputElement).value.trim();
-  const remember = (f.elements.namedItem("remember") as HTMLInputElement).checked;
-  if (!target) return;
-  const btn = f.querySelector<HTMLButtonElement>("button[type=submit]")!;
+// ---------------------------------------------------------------- add computer
+
+/** What the "Add computer" dialog currently lists, keyed by peer id. */
+const found = new Map<string, FoundPeer>();
+let scanRunning = false;
+
+function openPeerModal() {
+  $("peer-modal").hidden = false;
+  found.clear();
+  renderFound();
+  void refreshFound();
+}
+
+/** Show what mDNS already knows at once, then run the slower subnet scan. */
+async function refreshFound() {
+  try {
+    mergeFound(await api.discoveredPeers());
+  } catch {
+    /* node not running: the scan below reports it */
+  }
+  if (scanRunning) return;
+  scanRunning = true;
+  setScanStatus("scanning");
+  try {
+    // The scan already includes what mDNS knows, so it is the whole list:
+    // a computer that has gone away since the last scan must drop out.
+    const list = await api.scanNetwork();
+    found.clear();
+    mergeFound(list);
+    setScanStatus("done");
+  } catch (e) {
+    setScanStatus("failed");
+    toast(`${t().scanFailed}: ${errText(e)}`, true);
+  } finally {
+    scanRunning = false;
+  }
+}
+
+function mergeFound(list: FoundPeer[]) {
+  for (const p of list) {
+    if (p.id === state.me.id) continue;
+    const live = state.peers.get(p.id);
+    found.set(p.id, live ? { ...p, connected: true, name: live.name, addr: live.addr ?? p.addr } : p);
+  }
+  renderFound();
+}
+
+function setScanStatus(kind: "scanning" | "done" | "failed") {
+  const el = $("found-status");
+  el.replaceChildren();
+  $<HTMLButtonElement>("btn-scan").disabled = kind === "scanning";
+  if (kind === "scanning") {
+    const sp = document.createElement("span");
+    sp.className = "spinner";
+    el.append(sp, document.createTextNode(t().scanning));
+  } else if (kind === "done") {
+    el.textContent = t().scanDone(found.size);
+  } else {
+    el.textContent = t().scanFailed;
+  }
+}
+
+function renderFound() {
+  const list = $("found-list");
+  list.replaceChildren();
+  const rows = [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  if (rows.length === 0) {
+    const e = document.createElement("div");
+    e.className = "found-empty";
+    e.textContent = t().foundEmpty;
+    list.appendChild(e);
+    return;
+  }
+  for (const p of rows) {
+    const connected = p.connected || state.peers.has(p.id);
+    const row = document.createElement("div");
+    row.className = "found-row";
+    row.appendChild(avatar(p.id, p.name));
+    const text = document.createElement("div");
+    text.className = "found-text";
+    const name = document.createElement("div");
+    name.className = "found-name";
+    name.textContent = p.name || "?";
+    if (p.relay) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = t().hub;
+      name.appendChild(tag);
+    }
+    const meta = document.createElement("div");
+    meta.className = "found-meta";
+    meta.textContent = `${p.addr} · ${p.via === "mdns" ? t().viaMdns : t().viaScan}`;
+    text.append(name, meta);
+    row.appendChild(text);
+    if (connected) {
+      const ok = document.createElement("span");
+      ok.className = "found-ok";
+      const dot = document.createElement("span");
+      dot.className = "dot on";
+      ok.append(dot, document.createTextNode(t().connected));
+      row.appendChild(ok);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "primary-btn";
+      btn.textContent = t().connect;
+      btn.onclick = () => void connectTo(p.addr, btn);
+      row.appendChild(btn);
+    }
+    list.appendChild(row);
+  }
+}
+
+/** Connect to an address and, if the box is ticked, keep it in settings. */
+async function connectTo(target: string, btn: HTMLButtonElement): Promise<boolean> {
+  const remember = $<HTMLInputElement>("peer-remember").checked;
   btn.disabled = true;
   try {
     await api.connectPeer(target);
@@ -751,10 +862,73 @@ async function submitPeer(ev: Event) {
       const snap = await api.saveSettings({ ...state.settings, manual_peers: [...state.settings.manual_peers, target] });
       applySnapshot(snap);
     }
-    $("peer-modal").hidden = true;
-    (f.elements.namedItem("target") as HTMLInputElement).value = "";
+    renderFound();
+    return true;
   } catch (e) {
     toast(`${t().connectFailed}: ${errText(e)}`, true);
+    return false;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function submitPeer(ev: Event) {
+  ev.preventDefault();
+  const f = $<HTMLFormElement>("peer-form");
+  const input = f.elements.namedItem("target") as HTMLInputElement;
+  const target = input.value.trim();
+  if (!target) return;
+  const btn = f.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  if (await connectTo(target, btn)) {
+    $("peer-modal").hidden = true;
+    input.value = "";
+  }
+}
+
+// ---------------------------------------------------------------- first run
+
+/** Ask for a name once, before the app is used. Prefilled with the computer name. */
+function openWelcome() {
+  const f = $<HTMLFormElement>("welcome-form");
+  const input = f.elements.namedItem("display_name") as HTMLInputElement;
+  input.value = state.settings.display_name || state.me.name;
+  $("welcome-modal").hidden = false;
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 50);
+}
+
+async function submitWelcome(ev: Event) {
+  ev.preventDefault();
+  const f = $<HTMLFormElement>("welcome-form");
+  const input = f.elements.namedItem("display_name") as HTMLInputElement;
+  const name = input.value.trim();
+  if (!name) {
+    // Spaces only satisfy `required`; say why nothing happens.
+    input.value = "";
+    f.reportValidity();
+    return;
+  }
+  const btn = f.querySelector<HTMLButtonElement>("button[type=submit]")!;
+  btn.disabled = true;
+  try {
+    const snap = await api.saveSettings({ ...state.settings, display_name: name });
+    applySnapshot(snap);
+    $("welcome-modal").hidden = true;
+    $("input").focus();
+  } catch (e) {
+    // The name may be on disk even though the network failed to restart
+    // (port in use, ...). This dialog has no other way out, so check: once
+    // settings exist the error belongs to the main window, not here.
+    const snap = await api.snapshot().catch(() => null);
+    if (snap && !snap.first_run) {
+      applySnapshot(snap); // reports start_error itself
+      $("welcome-modal").hidden = true;
+      $("input").focus();
+    } else {
+      toast(errText(e), true);
+    }
   } finally {
     btn.disabled = false;
   }
@@ -767,6 +941,7 @@ function applySnapshot(snap: Snapshot) {
   state.addresses = snap.addresses;
   state.dataDir = snap.data_dir;
   state.startError = snap.start_error;
+  state.firstRun = snap.first_run;
   state.peers = new Map(snap.peers.map((p) => [p.id, p]));
   state.messages = snap.messages;
   state.names = new Map();
@@ -820,12 +995,18 @@ function onNetEvent(e: NetEvent) {
       state.names.set(e.peer.id, e.peer.name);
       renderSidebar();
       renderHeader();
+      if (!$("peer-modal").hidden) renderFound();
       if (state.active === ALL && state.messages.every((m) => m.to)) renderMessages();
       break;
     case "peer_offline":
       state.peers.delete(e.id);
       renderSidebar();
       renderHeader();
+      if (!$("peer-modal").hidden) {
+        const p = found.get(e.id);
+        if (p) found.set(e.id, { ...p, connected: false });
+        renderFound();
+      }
       break;
     case "message":
       addMessage(e.message, true);
@@ -898,12 +1079,11 @@ async function main() {
       toast(errText(e), true);
     }
   };
-  $("btn-add-peer").onclick = () => {
-    $("peer-modal").hidden = false;
-    (document.querySelector("#peer-form input[name=target]") as HTMLInputElement).focus();
-  };
+  $("btn-add-peer").onclick = openPeerModal;
   $("btn-peer-close").onclick = () => ($("peer-modal").hidden = true);
+  $("btn-scan").onclick = () => void refreshFound();
   $("peer-form").addEventListener("submit", (e) => void submitPeer(e));
+  $("welcome-form").addEventListener("submit", (e) => void submitWelcome(e));
   $("lightbox-close").onclick = () => ($("lightbox").hidden = true);
   $("lightbox").addEventListener("click", (e) => {
     if (e.target === e.currentTarget) $("lightbox").hidden = true;
@@ -934,6 +1114,7 @@ async function main() {
 
   await api.onNetEvent(onNetEvent);
   applySnapshot(await api.snapshot());
+  if (state.firstRun) openWelcome();
   // The node may finish starting after the first snapshot; refresh once.
   setTimeout(async () => applySnapshot(await api.snapshot()), 1500);
   input.focus();

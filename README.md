@@ -14,7 +14,8 @@ and macOS machines in any combination.
 
 - **Finds other computers by itself.** Open the app on two machines connected to
   the same Wi‑Fi or wired network and they show up in each other's sidebar
-  (mDNS/Bonjour).
+  (mDNS/Bonjour). If the router blocks that, *Add computer…* scans the local
+  subnet for other ChatLocal installations and lists them by name.
 - **Room and direct messages.** "Everyone" is a shared room. Click a person for a
   private conversation only the two of you receive.
 - **Voice notes.** Press the microphone, speak, press Send. Recorded as plain WAV
@@ -100,16 +101,23 @@ builds) and 11, and the installer fetches it if missing.
 
 ## Using it
 
-1. Open ChatLocal on two or more computers on the same network.
-2. Within a few seconds the other computers appear under **Online**.
+1. Open ChatLocal. The first time, it asks for your name or the device's
+   name, prefilled with the computer name. This is what other people see.
+2. Open it on one or more other computers on the same network. Within a few
+   seconds they appear under **Online**.
 3. Click **Everyone** to write to the room, or click a name for a direct message.
 4. Use the paperclip for files, the microphone for a voice note, or drag a file
    onto the window.
 
 If a computer does not appear automatically, click **Add computer…** at the
-bottom of the sidebar and type the address shown at the bottom of *its*
-sidebar (for example `192.168.1.23:47800`). Tick *Remember* to reconnect
-automatically next time.
+bottom of the sidebar. The dialog scans the network for other ChatLocal
+installations and lists them by name and address; click **Connect** next to
+the one you want. The scan combines mDNS announcements with a probe of every
+address in the local `/24` subnets at the ChatLocal port, so it also works
+when the router blocks mDNS. If the other computer is still not listed (for
+example on a different subnet), type the address shown at the bottom of
+*its* sidebar (for example `192.168.1.23:47800`) in the field underneath.
+Tick *Remember* to reconnect automatically next time.
 
 ### Server mode (optional)
 
@@ -159,7 +167,10 @@ installation to others; delete it to get a new identity).
 
 Each running copy of ChatLocal is a peer. It listens on a TCP port, announces
 itself with mDNS (`_chatlocal._tcp`), and opens a connection to every peer it
-learns about. Messages are JSON frames with a length prefix. An attachment is
+learns about. The *Add computer…* scan is an active complement to mDNS: it
+tries a TCP connection to every host of the local `/24` subnets on the
+ChatLocal port, reads the hello frame the other side sends on accept, and
+closes without sending its own, so the probed peer never sees a connection. Messages are JSON frames with a length prefix. An attachment is
 announced by its message frame and then streamed as 256 KB chunks, each a
 small frame of its own, followed by an end marker; the receiver writes them to
 a `.part` file and renames it once the SHA-256 matches. Control frames (text,

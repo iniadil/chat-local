@@ -1,6 +1,6 @@
 use crate::state::{self, AppState};
 use base64::Engine;
-use lanchat_net::{Message, PeerInfo, Settings};
+use lanchat_net::{FoundPeer, Message, PeerInfo, Settings};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, State};
@@ -15,6 +15,9 @@ pub struct Snapshot {
     pub messages: Vec<Message>,
     pub data_dir: String,
     pub start_error: Option<String>,
+    /// No settings have been saved yet: the app was just installed and
+    /// should ask for a name before anything else.
+    pub first_run: bool,
 }
 
 fn snapshot(state: &AppState) -> Snapshot {
@@ -34,6 +37,7 @@ fn snapshot(state: &AppState) -> Snapshot {
         messages: node.as_ref().map(|n| n.messages()).unwrap_or_default(),
         data_dir: state.data_dir.to_string_lossy().to_string(),
         start_error: state.start_error.lock().unwrap().clone(),
+        first_run: !state.data_dir.join("settings.json").exists(),
     }
 }
 
@@ -184,6 +188,20 @@ pub async fn send_blob(
         .send_bytes(to, blob.file_name, blob.mime, bytes, blob.duration_ms)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Peers announced over mDNS, for the "Add computer" dialog. Instant.
+#[tauri::command]
+pub fn discovered_peers(state: State<'_, AppState>) -> Result<Vec<FoundPeer>, String> {
+    Ok(node_or_err(&state)?.discovered())
+}
+
+/// Probe the local subnets for other ChatLocal installations. Takes a few
+/// seconds; the result also includes what mDNS knows.
+#[tauri::command]
+pub async fn scan_network(state: State<'_, AppState>) -> Result<Vec<FoundPeer>, String> {
+    let node = node_or_err(&state)?;
+    Ok(node.scan_lan().await)
 }
 
 #[tauri::command]
