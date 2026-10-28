@@ -234,6 +234,48 @@ async fn simultaneous_dial_keeps_one_connection() {
     assert_eq!(b.peers().len(), 1);
 }
 
+/// A manual address that differs from the one the peer reports (a port
+/// forward) still counts as connected: the reconnect loop must not dial it
+/// again and replace the working connection every few seconds.
+#[tokio::test]
+async fn forwarded_manual_peer_is_not_redialed() {
+    let (a, mut a_rx, _da) = spawn("A", false, vec![]).await;
+    // Forward a second port to A, so the dialed address never equals
+    // A's own `ip:port`.
+    let fwd = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fwd_addr = fwd.local_addr().unwrap();
+    let a_addr = format!("127.0.0.1:{}", a.port());
+    tokio::spawn(async move {
+        while let Ok((mut inbound, _)) = fwd.accept().await {
+            let a_addr = a_addr.clone();
+            tokio::spawn(async move {
+                let mut out = tokio::net::TcpStream::connect(a_addr).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut inbound, &mut out).await;
+            });
+        }
+    });
+
+    let (_b, mut b_rx, _db) = spawn("B", false, vec![fwd_addr.to_string()]).await;
+    wait_for(&mut b_rx, "A online", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+    wait_for(&mut a_rx, "B online", |e| {
+        matches!(e, Event::PeerOnline { .. })
+    })
+    .await;
+
+    // Longer than one reconnect interval: any redial shows up as another
+    // PeerOnline on A.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(7);
+    while let Ok(Some(ev)) = tokio::time::timeout_at(deadline, a_rx.recv()).await {
+        assert!(
+            !matches!(ev, Event::PeerOnline { .. }),
+            "forwarded peer was dialed again"
+        );
+    }
+}
+
 /// A file far larger than one chunk crosses a relay intact, the relay keeps
 /// nothing on disk for a direct message, and text sent during the transfer
 /// is not held behind it.
